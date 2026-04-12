@@ -886,8 +886,25 @@ def test_manifest_metadata_matches_server_identity() -> None:
 
     assert codex_manifest["name"] == server.SERVER_NAME == gemini_manifest["name"]
     assert codex_manifest["version"] == server.SERVER_VERSION == gemini_manifest["version"]
+    assert gemini_manifest["description"] == codex_manifest["description"]
     assert gemini_manifest["contextFileName"] == "GEMINI.md"
     assert gemini_manifest["mcpServers"]["pythia-sim"]["command"] == "python3"
+    assert gemini_manifest["mcpServers"]["pythia-sim"]["args"] == [
+        "${extensionPath}${/}scripts${/}pythia_sim_server.py"
+    ]
+
+
+def test_gemini_manifest_exposes_expected_settings() -> None:
+    gemini_manifest = json.loads((PLUGIN_ROOT / "gemini-extension.json").read_text(encoding="utf-8"))
+
+    settings = gemini_manifest["settings"]
+    assert [setting["envVar"] for setting in settings] == [
+        core.PYTHIA_SIM_ROOT_ENV,
+        core.PYTHIA_SIM_ROOT_ALIAS_ENV,
+        core.PYTHIA_SIM_REGISTRY_PATH_ENV,
+        core.PYTHIA_SIM_STATE_DIR_ENV,
+    ]
+    assert all(setting["sensitive"] is False for setting in settings)
 
 
 def test_gemini_qualified_tool_names_fit_length_limit() -> None:

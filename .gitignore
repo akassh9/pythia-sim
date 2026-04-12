@@ -88,3 +88,6 @@ venv.bak/
 
 # macOS
 .DS_Store
+
+# Gemini linked-extension settings
+.env

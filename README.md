@@ -58,6 +58,20 @@ Public GitHub install flow:
 gemini extensions install <repo-url>
 ```
 
+After installation, configure either a single Pythia checkout:
+
+```bash
+gemini extensions config pythia-sim "Pythia Root"
+```
+
+or a multi-root registry:
+
+```bash
+gemini extensions config pythia-sim "Registry Path"
+```
+
+Gemini stores extension settings in an extension-local `.env`, so `gemini extensions config` is the preferred setup flow after install.
+
 Gemini CLI requires trusted workspaces for stdio MCP servers. In any workspace where you want the extension to run:
 
 ```bash
@@ -129,6 +143,8 @@ The existing Codex packaging remains in place:
 - `skills/pythia-sim/SKILL.md`
 
 Codex and Gemini CLI both use the same MCP tool surface.
+
+If you publish this on GitHub for `gemini extensions install https://github.com/xyz/abc`, keep the extension manifest `name` aligned with the installed directory name. The safest public layout is a repository named `pythia-sim`, matching `gemini-extension.json`.
 
 ## Development
 
