@@ -99,12 +99,12 @@ LEGACY_COMPLETED_RUNS_ROOT = _legacy_completed_runs_root(PLUGIN_ROOT)
 LEGACY_LOCKS_ROOT = _legacy_locks_root(PLUGIN_ROOT)
 
 DEFAULT_BUILD_COMMAND = ["make", "-j2"]
-DEFAULT_COMPILE_TIMEOUT_SEC = 30
-DEFAULT_RUN_TIMEOUT_SEC = 15
-DEFAULT_MAX_OUTPUT_BYTES = 120_000
-MAX_COMPILE_TIMEOUT_SEC = 300
-MAX_RUN_TIMEOUT_SEC = 120
-MAX_OUTPUT_BYTES = 200_000
+DEFAULT_COMPILE_TIMEOUT_SEC = 60
+DEFAULT_RUN_TIMEOUT_SEC = 60
+DEFAULT_MAX_OUTPUT_BYTES = 500_000
+MAX_COMPILE_TIMEOUT_SEC = 900
+MAX_RUN_TIMEOUT_SEC = 600
+MAX_OUTPUT_BYTES = 2_000_000
 MIN_OUTPUT_BYTES = 4_096
 AUTO_BUILD_TIMEOUT_SEC = 1_200
 MAX_SOURCE_BYTES = 160_000
@@ -120,7 +120,9 @@ EXAMPLE_SAFETY_MODE_ALL = "all"
 EXAMPLE_SAFETY_TAG_STANDALONE = "standalone_safe"
 EXAMPLE_SAFETY_TAG_EXTERNAL = "requires_external_dep"
 DEFAULT_INTROSPECTION_EVENT_COUNT = 200
-MAX_INTROSPECTION_EVENT_COUNT = 2_000
+# Event-record captures keep only compact aggregates plus a small bounded sample of example
+# events, so a 10k-event scan stays practical for common standalone studies.
+MAX_INTROSPECTION_EVENT_COUNT = 10_000
 DEFAULT_INTROSPECTION_EXAMPLE_EVENTS = 6
 MAX_INTROSPECTION_EXAMPLE_EVENTS = 12
 MAX_TRACE_DEPTH = 24
@@ -539,6 +541,53 @@ def _validate_cmnd_text(value: Any) -> str | None:
     return cmnd_text + ("\n" if not cmnd_text.endswith("\n") else "")
 
 
+KNOWN_UNSUPPORTED_SILENCING_SETTINGS = {
+    "Main:showBanner",
+    "Main:showNextStats",
+}
+KNOWN_UNSUPPORTED_SILENCING_GUIDANCE = (
+    "Do not guess unsupported Pythia silencing settings. "
+    "Use Next:numberShowEvent = 0, Next:numberShowInfo = 0, Next:numberShowProcess = 0, "
+    "print concise custom summaries in your code, or use search_pythia_examples to confirm supported settings."
+)
+
+
+def _setting_key_from_line(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("!"):
+        return None
+    comment_index = stripped.find("#")
+    if comment_index == 0:
+        return None
+    if comment_index > 0:
+        stripped = stripped[:comment_index].rstrip()
+    key, separator, _ = stripped.partition("=")
+    if not separator:
+        return None
+    key = key.strip()
+    return key or None
+
+
+def _reject_known_unsupported_silencing_settings(
+    *, commands: list[str], cmnd_text: str | None
+) -> None:
+    invalid_keys: set[str] = set()
+    for command in commands:
+        key = _setting_key_from_line(command)
+        if key in KNOWN_UNSUPPORTED_SILENCING_SETTINGS:
+            invalid_keys.add(key)
+    if cmnd_text is not None:
+        for line in cmnd_text.splitlines():
+            key = _setting_key_from_line(line)
+            if key in KNOWN_UNSUPPORTED_SILENCING_SETTINGS:
+                invalid_keys.add(key)
+    if invalid_keys:
+        keys = ", ".join(sorted(invalid_keys))
+        raise PythiaSimError(
+            f"Unsupported Pythia setting(s): {keys}. {KNOWN_UNSUPPORTED_SILENCING_GUIDANCE}"
+        )
+
+
 def validate_event_record_simulation_spec(arguments: dict[str, Any]) -> EventRecordSimulationSpec:
     _reject_removed_artifact_cap(arguments)
     root_alias = arguments.get("root_alias")
@@ -548,6 +597,7 @@ def validate_event_record_simulation_spec(arguments: dict[str, Any]) -> EventRec
     cmnd_text = _validate_cmnd_text(arguments.get("cmnd_text"))
     if not commands and cmnd_text is None:
         raise PythiaSimError("Provide commands, cmnd_text, or both.")
+    _reject_known_unsupported_silencing_settings(commands=commands, cmnd_text=cmnd_text)
     return EventRecordSimulationSpec(
         root_alias=root_alias,
         commands=commands,
@@ -2151,6 +2201,36 @@ def _chain_match_sequences(
     return matches
 
 
+def _scan_decay_chain_example_matches(
+    examples: dict[str, Any], chain_query: DecayChainQuery
+) -> tuple[int, int, list[dict[str, Any]]]:
+    total_match_count = 0
+    matched_event_count = 0
+    representative_matches: list[dict[str, Any]] = []
+
+    events = examples.get("events")
+    if not isinstance(events, list):
+        return total_match_count, matched_event_count, representative_matches
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        matches = _chain_match_sequences(event, chain_query)
+        if not matches:
+            continue
+        matched_event_count += 1
+        total_match_count += len(matches)
+        if len(representative_matches) < 3:
+            representative_matches.append(
+                {
+                    "accepted_event_index": event.get("accepted_event_index"),
+                    "matches": matches[:3],
+                }
+            )
+
+    return total_match_count, matched_event_count, representative_matches
+
+
 def _run_subprocess_capped(
     command: list[str],
     *,
@@ -2655,36 +2735,33 @@ class PythiaSimulationRunner:
         payload = _base_payload_from_bundle(bundle)
         payload["used_existing_run"] = used_existing_run
         summary = bundle["summary"]
+        examples = bundle["examples"]
         chain_key = _build_decay_chain_key(chain_query)
         decay_chain_counts = summary.get("decay_chain_counts", {})
-        chain_match_count = 0
+        summary_match_count = 0
         if isinstance(decay_chain_counts, dict):
             try:
-                chain_match_count = int(decay_chain_counts.get(chain_key, 0))
+                summary_match_count = int(decay_chain_counts.get(chain_key, 0))
             except (TypeError, ValueError):
-                chain_match_count = 0
-        representative_matches: list[dict[str, Any]] = []
-        events = bundle["examples"].get("events")
-        if isinstance(events, list):
-            for event in events:
-                if not isinstance(event, dict):
-                    continue
-                matches = _chain_match_sequences(event, chain_query)
-                if not matches:
-                    continue
-                representative_matches.append(
-                    {
-                        "accepted_event_index": event.get("accepted_event_index"),
-                        "matches": matches[:3],
-                    }
-                )
+                summary_match_count = 0
+        (
+            example_snapshot_match_count,
+            example_snapshot_match_event_count,
+            representative_matches,
+        ) = _scan_decay_chain_example_matches(examples, chain_query)
         payload["analysis_ok"] = True
-        payload["decay_chain"] = {
+        decay_chain_payload = {
             "query": dataclasses.asdict(chain_query),
             "chain_key": chain_key,
-            "match_count": chain_match_count,
-            "representative_matches": representative_matches[:3],
+            "summary_match_count": summary_match_count,
+            "example_snapshot_match_count": example_snapshot_match_count,
+            "example_snapshot_match_event_count": example_snapshot_match_event_count,
+            "stored_example_event_count": examples.get("stored_event_count"),
+            "representative_matches": representative_matches,
         }
+        if summary_match_count == example_snapshot_match_count:
+            decay_chain_payload["match_count"] = summary_match_count
+        payload["decay_chain"] = decay_chain_payload
         return payload
 
     def explain_status_codes(self, arguments: dict[str, Any]) -> dict[str, Any]:

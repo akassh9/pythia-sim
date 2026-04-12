@@ -61,13 +61,112 @@ def _truncate_text_block(text: str, *, limit: int = 1600) -> str:
         return ""
     if len(normalized) <= limit:
         return normalized
+    if limit <= 32:
+        return normalized[:limit]
     return normalized[: limit - 18].rstrip() + "\n...[truncated]"
 
 
-def _append_output_block(lines: list[str], title: str, text: Any, *, limit: int = 1600) -> None:
+def _truncate_line(text: str, *, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit <= 20:
+        return text[:limit]
+    return text[: limit - 15].rstrip() + " ...[truncated]"
+
+
+def _collect_lines_with_budget(
+    lines: list[str], *, max_lines: int, max_chars: int, from_end: bool
+) -> list[str]:
+    if max_lines <= 0 or max_chars <= 0:
+        return []
+    selected: list[str] = []
+    total_chars = 0
+    iterable = reversed(lines) if from_end else iter(lines)
+    for raw_line in iterable:
+        line = raw_line
+        if not selected and len(line) > max_chars:
+            line = _truncate_line(line, limit=max_chars)
+        line_cost = len(line) + (1 if selected else 0)
+        if selected and total_chars + line_cost > max_chars:
+            break
+        if not selected and len(line) > max_chars:
+            break
+        selected.append(line)
+        total_chars += line_cost
+        if len(selected) >= max_lines:
+            break
+    if from_end:
+        selected.reverse()
+    return selected
+
+
+def _head_tail_text_block(
+    text: str,
+    *,
+    limit: int,
+    head_lines: int = 8,
+    tail_lines: int = 20,
+    head_fraction: float = 0.3,
+) -> str:
+    normalized = text.strip()
+    if not normalized:
+        return ""
+    if len(normalized) <= limit:
+        return normalized
+
+    lines = normalized.splitlines()
+    notice_template = "...[output shortened; omitted {omitted_lines} middle lines and {omitted_chars} chars]..."
+    head_budget = max(160, int(limit * head_fraction))
+    head = _collect_lines_with_budget(lines, max_lines=head_lines, max_chars=head_budget, from_end=False)
+    remaining_lines = lines[len(head) :] if head else lines
+    tail_budget = max(160, limit - sum(len(line) for line in head) - max(len(head) - 1, 0) - 120)
+    tail = _collect_lines_with_budget(
+        remaining_lines, max_lines=tail_lines, max_chars=tail_budget, from_end=True
+    )
+    if not tail:
+        tail = _collect_lines_with_budget(lines, max_lines=tail_lines, max_chars=tail_budget, from_end=True)
+    omitted_lines = max(0, len(lines) - len(head) - len(tail))
+    visible_chars = sum(len(line) for line in head) + sum(len(line) for line in tail)
+    omitted_chars = max(0, len(normalized) - visible_chars)
+    notice = notice_template.format(
+        omitted_lines=omitted_lines,
+        omitted_chars=omitted_chars,
+    )
+
+    parts: list[str] = []
+    if head:
+        parts.append("\n".join(head))
+    parts.append(notice)
+    if tail:
+        parts.append("\n".join(tail))
+    rendered = "\n".join(parts)
+    if len(rendered) <= limit:
+        return rendered
+    tail_only_notice = (
+        f"[output shortened; showing last {len(tail)} of {len(lines)} lines, "
+        f"omitted {max(0, len(lines) - len(tail))} earlier lines]"
+    )
+    tail_only_budget = max(120, limit - len(tail_only_notice) - 1)
+    tail_only = _collect_lines_with_budget(lines, max_lines=tail_lines, max_chars=tail_only_budget, from_end=True)
+    return tail_only_notice + "\n" + "\n".join(tail_only)
+
+
+def _append_output_block(
+    lines: list[str],
+    title: str,
+    text: Any,
+    *,
+    limit: int = 1600,
+    strategy: str = "head",
+) -> None:
     if not isinstance(text, str):
         return
-    trimmed = _truncate_text_block(text, limit=limit)
+    if strategy == "head_tail":
+        trimmed = _head_tail_text_block(text, limit=limit)
+    elif strategy == "tail":
+        trimmed = _head_tail_text_block(text, limit=limit, head_lines=0, tail_lines=24, head_fraction=0.0)
+    else:
+        trimmed = _truncate_text_block(text, limit=limit)
     if not trimmed:
         return
     lines.append("")
@@ -152,10 +251,34 @@ def _summarize_run(payload: dict[str, Any]) -> str:
         lines.append(f"compile_commands: {command_summary}")
     if payload.get("failure_artifacts_path"):
         lines.append(f"failure_artifacts_path: {payload['failure_artifacts_path']}")
-    _append_output_block(lines, "compile stdout", compile_result.get("stdout"), limit=1200)
-    _append_output_block(lines, "compile stderr", compile_result.get("stderr"), limit=1200)
-    _append_output_block(lines, "run stdout", run_result.get("stdout"), limit=1200)
-    _append_output_block(lines, "run stderr", run_result.get("stderr"), limit=1200)
+    _append_output_block(
+        lines,
+        "compile stdout",
+        compile_result.get("stdout"),
+        limit=1600,
+        strategy="head_tail",
+    )
+    _append_output_block(
+        lines,
+        "compile stderr",
+        compile_result.get("stderr"),
+        limit=1600,
+        strategy="head_tail",
+    )
+    _append_output_block(
+        lines,
+        "run stdout",
+        run_result.get("stdout"),
+        limit=2800,
+        strategy="head_tail",
+    )
+    _append_output_block(
+        lines,
+        "run stderr",
+        run_result.get("stderr"),
+        limit=2200,
+        strategy="head_tail",
+    )
     return "\n".join(lines)
 
 
@@ -244,14 +367,24 @@ def _summarize_decay_chain(payload: dict[str, Any]) -> str:
     if not payload.get("analysis_ok"):
         return payload.get("message", _summarize_run(payload))
     chain = payload.get("decay_chain", {})
+    summary_match_count = chain.get("summary_match_count")
+    example_snapshot_match_count = chain.get("example_snapshot_match_count")
     lines = [
         f"run_id: {payload['run_id']}",
         f"root_alias: {payload['root_alias']}",
         f"used_existing_run: {payload.get('used_existing_run')}",
         f"chain_key: {chain.get('chain_key')}",
-        f"match_count: {chain.get('match_count')}",
+        f"summary_match_count: {summary_match_count}",
+        f"example_snapshot_match_count: {example_snapshot_match_count}",
+        f"example_snapshot_match_event_count: {chain.get('example_snapshot_match_event_count')}",
+        f"stored_example_event_count: {chain.get('stored_example_event_count')}",
         f"representative_matches: {len(chain.get('representative_matches', []))}",
     ]
+    if summary_match_count != example_snapshot_match_count:
+        lines.append(
+            "count_scope_note: summary_match_count comes from the stored full-run histogram; "
+            "example_snapshot_match_count comes from the stored example snapshots used for representatives."
+        )
     representative_matches = chain.get("representative_matches", [])
     if isinstance(representative_matches, list) and representative_matches:
         lines.append("")

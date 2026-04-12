@@ -39,5 +39,13 @@ This extension is text-only for user-visible output.
 
 - Keep the source standalone. Include only Pythia and safe standard library headers.
 - Pass companion text inputs only through `supporting_files`.
-- Prefer small event loops and bounded output so responses stay readable.
+- Do not invent Pythia `readString(...)` settings unless they are confirmed from examples, docs, or tool output.
+- Invalid guessed settings such as `Main:showBanner = off` or `Main:showNextStats = off` can abort at `pythia.init()`.
+- If a run should stay concise, prefer supported output reduction that is already known to work:
+  - `Next:numberShowEvent = 0`
+  - `Next:numberShowInfo = 0`
+  - `Next:numberShowProcess = 0`
+- Prefer concise custom result printing in user code instead of guessed suppression flags.
+- If you need to discover settings or patterns, use `search_pythia_examples` instead of guessing.
+- Prefer bounded event loops and minimized program output so responses stay readable.
 - If the request depends on unsupported external libraries, say the extension does not support that workflow in v1.

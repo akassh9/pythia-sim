@@ -121,7 +121,12 @@ def _terminal_output_block(name: str, kind: str, text: str) -> str:
     )
 
 
-def _write_event_record_bundle(plugin_root: Path, run_id: str = "trace123") -> Path:
+def _write_event_record_bundle(
+    plugin_root: Path,
+    run_id: str = "trace123",
+    *,
+    decay_chain_counts: dict[str, int] | None = None,
+) -> Path:
     completed_dir = plugin_root / ".runs" / "completed" / run_id
     completed_dir.mkdir(parents=True, exist_ok=True)
     summary = {
@@ -133,7 +138,11 @@ def _write_event_record_bundle(plugin_root: Path, run_id: str = "trace123") -> P
         "final_state_pdg_counts": {"13": 4, "-13": 4},
         "status_code_counts": {"-23": 1, "-21": 2, "1": 2},
         "final_state_multiplicity_counts": {"2": 4},
-        "decay_chain_counts": {"23>13": 4, "23>-13": 4},
+        "decay_chain_counts": (
+            {"23>13": 4, "23>-13": 4}
+            if decay_chain_counts is None
+            else decay_chain_counts
+        ),
     }
     examples = {
         "version": 1,
@@ -363,6 +372,35 @@ def test_resolve_state_root_prefers_override_and_platform_defaults(
     assert mac_state == (
         home / ".pythia-sim" / "state"
     ).resolve()
+
+
+def test_runtime_limits_are_raised_for_common_production_runs() -> None:
+    assert core.DEFAULT_COMPILE_TIMEOUT_SEC == 60
+    assert core.DEFAULT_RUN_TIMEOUT_SEC == 60
+    assert core.DEFAULT_MAX_OUTPUT_BYTES == 500_000
+    assert core.MAX_COMPILE_TIMEOUT_SEC == 900
+    assert core.MAX_RUN_TIMEOUT_SEC == 600
+    assert core.MAX_OUTPUT_BYTES == 2_000_000
+    assert core.MAX_INTROSPECTION_EVENT_COUNT == 10_000
+
+
+def test_tool_schemas_expose_updated_runtime_limit_maxima() -> None:
+    introspection_tools = [
+        core.SUMMARIZE_EVENT_RECORD_TOOL,
+        core.TRACE_PARTICLE_LINEAGE_TOOL,
+        core.FIND_DECAY_CHAIN_TOOL,
+    ]
+    for tool in introspection_tools:
+        properties = tool["inputSchema"]["properties"]
+        assert properties["event_count"]["maximum"] == core.MAX_INTROSPECTION_EVENT_COUNT
+        assert properties["compile_timeout_sec"]["maximum"] == core.MAX_COMPILE_TIMEOUT_SEC
+        assert properties["run_timeout_sec"]["maximum"] == core.MAX_RUN_TIMEOUT_SEC
+        assert properties["max_output_bytes"]["maximum"] == core.MAX_OUTPUT_BYTES
+
+    run_properties = core.RUN_SIMULATION_TOOL["inputSchema"]["properties"]
+    assert run_properties["compile_timeout_sec"]["maximum"] == core.MAX_COMPILE_TIMEOUT_SEC
+    assert run_properties["run_timeout_sec"]["maximum"] == core.MAX_RUN_TIMEOUT_SEC
+    assert run_properties["max_output_bytes"]["maximum"] == core.MAX_OUTPUT_BYTES
 
 
 def test_parse_makefile_inc_extracts_required_fields(tmp_path: Path) -> None:
@@ -673,6 +711,47 @@ def test_server_run_summary_includes_outputs_but_not_artifacts() -> None:
     assert "sigmaGen = 12.5" in summary
 
 
+def test_server_run_summary_prefers_head_and_tail_for_long_output() -> None:
+    long_stdout = "\n".join(
+        [f"banner line {index}: {'x' * 28}" for index in range(80)]
+        + [
+            "@@@ RESULT: 5000 Z bosons from 5000 events. @@@",
+            "@@@ CROSS SECTION: 4.410e-06 +/- 3.665e-08 mb @@@",
+        ]
+    )
+    long_stderr = "\n".join(
+        [f"stderr line {index}: {'y' * 32}" for index in range(70)]
+        + ["[pythia-sim] Process timed out after 60 seconds."]
+    )
+    payload = {
+        "run_id": "run123",
+        "root_alias": "local",
+        "bootstrap_performed": False,
+        "compile": {
+            "ok": True,
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+            "command_summary": "direct: g++ source.cpp -o simulation.out",
+        },
+        "run": {
+            "ok": False,
+            "exit_code": 124,
+            "stdout": long_stdout,
+            "stderr": long_stderr,
+            "timed_out": True,
+        },
+    }
+
+    summary = server._summarize_run(payload)
+
+    assert "banner line 0" in summary
+    assert "@@@ RESULT: 5000 Z bosons from 5000 events. @@@" in summary
+    assert "@@@ CROSS SECTION: 4.410e-06 +/- 3.665e-08 mb @@@" in summary
+    assert "[pythia-sim] Process timed out after 60 seconds." in summary
+    assert "output shortened" in summary
+
+
 def test_build_tool_result_is_text_only() -> None:
     payload = {
         "run_id": "testrun",
@@ -690,6 +769,33 @@ def test_build_tool_result_is_text_only() -> None:
 def test_event_record_spec_requires_commands_or_cmnd_text() -> None:
     with pytest.raises(core.PythiaSimError, match="Provide commands, cmnd_text, or both"):
         core.validate_event_record_simulation_spec({})
+
+
+def test_event_record_spec_accepts_new_introspection_maximum() -> None:
+    spec = core.validate_event_record_simulation_spec(
+        {
+            "commands": ["WeakSingleBoson:ffbar2gmZ = on"],
+            "event_count": core.MAX_INTROSPECTION_EVENT_COUNT,
+        }
+    )
+
+    assert spec.event_count == core.MAX_INTROSPECTION_EVENT_COUNT
+
+
+def test_event_record_spec_rejects_known_invalid_silencing_settings() -> None:
+    with pytest.raises(core.PythiaSimError, match="Main:showBanner"):
+        core.validate_event_record_simulation_spec(
+            {
+                "commands": ["Main:showBanner = off"],
+            }
+        )
+
+    with pytest.raises(core.PythiaSimError, match="Next:numberShowEvent = 0"):
+        core.validate_event_record_simulation_spec(
+            {
+                "cmnd_text": "Main:showNextStats = off\n",
+            }
+        )
 
 
 def test_trace_particle_lineage_reuses_completed_run(tmp_path: Path) -> None:
@@ -724,9 +830,36 @@ def test_find_decay_chain_reuses_summary_and_examples(tmp_path: Path) -> None:
 
     assert payload["analysis_ok"] is True
     assert payload["decay_chain"]["chain_key"] == "23>13"
-    assert payload["decay_chain"]["match_count"] == 4
+    assert payload["decay_chain"]["summary_match_count"] == 4
+    assert payload["decay_chain"]["example_snapshot_match_count"] == 1
+    assert payload["decay_chain"]["example_snapshot_match_event_count"] == 1
+    assert "match_count" not in payload["decay_chain"]
     assert payload["decay_chain"]["representative_matches"]
     assert payload["decay_chain"]["representative_matches"][0]["accepted_event_index"] == 0
+
+
+def test_find_decay_chain_reports_snapshot_mismatch_without_ambiguous_match_count(
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path)
+    _write_event_record_bundle(
+        runner.plugin_root,
+        run_id="trace123",
+        decay_chain_counts={"23>-13": 4},
+    )
+
+    payload = runner.find_decay_chain(
+        {
+            "run_id": "trace123",
+            "decay_chain": {"parent_pdg_id": 23, "child_pdg_id": 13},
+        }
+    )
+
+    assert payload["analysis_ok"] is True
+    assert payload["decay_chain"]["summary_match_count"] == 0
+    assert payload["decay_chain"]["example_snapshot_match_count"] == 1
+    assert payload["decay_chain"]["representative_matches"]
+    assert "match_count" not in payload["decay_chain"]
 
 
 def test_explain_status_codes_annotates_observed_counts(tmp_path: Path) -> None:
@@ -857,6 +990,9 @@ def test_server_analysis_summaries_include_representative_details(tmp_path: Path
     assert "representative_lineage_paths:" in lineage_summary
     assert "6:13[1] -> 5:23[-23] -> 1:2[-21]" in lineage_summary
     assert "representative_matches_detail:" in decay_summary
+    assert "summary_match_count: 4" in decay_summary
+    assert "example_snapshot_match_count: 1" in decay_summary
+    assert "count_scope_note:" in decay_summary
     assert "5:23 -> 6:13" in decay_summary
     assert "-23: Hardest subprocess." in status_summary
 
@@ -892,6 +1028,18 @@ def test_manifest_metadata_matches_server_identity() -> None:
     assert gemini_manifest["mcpServers"]["pythia-sim"]["args"] == [
         "${extensionPath}${/}scripts${/}pythia_sim_server.py"
     ]
+
+
+def test_mcp_config_matches_packaging_entrypoints() -> None:
+    codex_manifest = json.loads((PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    gemini_manifest = json.loads((PLUGIN_ROOT / "gemini-extension.json").read_text(encoding="utf-8"))
+    mcp_config = json.loads((PLUGIN_ROOT / ".mcp.json").read_text(encoding="utf-8"))
+
+    assert codex_manifest["mcpServers"] == "./.mcp.json"
+    assert "pythia-sim" in gemini_manifest["mcpServers"]
+    assert mcp_config["mcpServers"]["pythia-sim"]["command"] == "python3"
+    assert mcp_config["mcpServers"]["pythia-sim"]["args"] == ["./scripts/pythia_sim_server.py"]
+    assert mcp_config["mcpServers"]["pythia-sim"]["cwd"] == "./"
 
 
 def test_gemini_manifest_has_no_install_time_settings() -> None:

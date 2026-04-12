@@ -35,6 +35,8 @@ The shared runtime lives in `scripts/pythia_sim_server.py`.
 - JSON output is normalized before the result is returned
 - histograms are rendered as fixed-width ASCII bars
 - successful raw runs do not persist public artifacts
+- concise runs should reduce output with supported settings such as `Next:numberShowEvent = 0`, `Next:numberShowInfo = 0`, and `Next:numberShowProcess = 0`
+- avoid guessing unsupported settings like `Main:showBanner = off`; use `search_pythia_examples` when you need to confirm valid Pythia options
 
 Event-record tools still preserve reusable state, but only as private internal snapshots containing:
 

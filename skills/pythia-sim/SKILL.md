@@ -34,6 +34,10 @@ Do not use it when the task needs:
 
 - Keep the source standalone. Include only Pythia and safe standard library headers.
 - Prefer `search_pythia_examples` over ad hoc shell access when you need example patterns from the Pythia tree.
+- Do not invent Pythia `readString(...)` settings from memory.
+- Avoid guessed silencing flags such as `Main:showBanner = off` or `Main:showNextStats = off`; they are not reliable and can abort `pythia.init()`.
+- For concise runs, prefer known working controls such as `Next:numberShowEvent = 0`, `Next:numberShowInfo = 0`, and `Next:numberShowProcess = 0`.
+- Keep the user program output concise with custom summary lines instead of guessing unsupported suppression settings.
 - Successful raw runs clean up their work directories; only failed runs and private event-record snapshots persist.
 - If the request depends on external HEP libraries, say this plugin does not support that in v1.
 - Prefer small event loops and bounded output so tool results stay readable.
