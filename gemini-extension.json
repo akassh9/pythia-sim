@@ -3,32 +3,6 @@
   "version": "0.1.0",
   "description": "Run standalone Pythia 8 simulations through a local stdio MCP server.",
   "contextFileName": "GEMINI.md",
-  "settings": [
-    {
-      "name": "Pythia Root",
-      "description": "Absolute path to a configured standalone Pythia 8 checkout. Set this for the simplest single-root installation.",
-      "envVar": "PYTHIA_SIM_ROOT",
-      "sensitive": false
-    },
-    {
-      "name": "Pythia Root Alias",
-      "description": "Optional alias for the single-root setup defined by PYTHIA_SIM_ROOT. Defaults to \"default\" when omitted.",
-      "envVar": "PYTHIA_SIM_ROOT_ALIAS",
-      "sensitive": false
-    },
-    {
-      "name": "Registry Path",
-      "description": "Optional path to a roots.json registry file for multi-root setups. This takes precedence over PYTHIA_SIM_ROOT.",
-      "envVar": "PYTHIA_SIM_REGISTRY_PATH",
-      "sensitive": false
-    },
-    {
-      "name": "State Directory",
-      "description": "Optional directory for run state, private snapshots, failed-run artifacts, and downloaded vendor builds.",
-      "envVar": "PYTHIA_SIM_STATE_DIR",
-      "sensitive": false
-    }
-  ],
   "mcpServers": {
     "pythia-sim": {
       "command": "python3",

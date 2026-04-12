@@ -58,19 +58,12 @@ Public GitHub install flow:
 gemini extensions install <repo-url>
 ```
 
-After installation, configure either a single Pythia checkout:
+There is no install-time questionnaire anymore. The intended flow is:
 
-```bash
-gemini extensions config pythia-sim "Pythia Root"
-```
-
-or a multi-root registry:
-
-```bash
-gemini extensions config pythia-sim "Registry Path"
-```
-
-Gemini stores extension settings in an extension-local `.env`, so `gemini extensions config` is the preferred setup flow after install.
+1. Install the extension from GitHub.
+2. Trust the workspace with `gemini trust`.
+3. If the machine does not already have a configured Pythia checkout, ask Gemini to use `bootstrap_pythia`.
+4. If you already manage your own Pythia installs, optionally configure them through environment variables or a registry file.
 
 Gemini CLI requires trusted workspaces for stdio MCP servers. In any workspace where you want the extension to run:
 
@@ -91,6 +84,8 @@ The fastest setup path is a single environment variable:
 ```bash
 export PYTHIA_SIM_ROOT=/path/to/pythia
 ```
+
+If nothing is configured yet, the extension can bootstrap its own local standalone Pythia installation through the `bootstrap_pythia` MCP tool.
 
 Optional environment variables:
 
