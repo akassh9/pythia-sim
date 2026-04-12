@@ -2,10 +2,11 @@
 
 `pythia-sim` exposes standalone Pythia 8 workflows through a local stdio MCP server.
 
-The repo supports two hosts with the same runtime:
+The repo supports three hosts with the same runtime:
 
 - Codex plugin packaging through `.codex-plugin/plugin.json`
 - Gemini CLI extension packaging through `gemini-extension.json`
+- Claude Code plugin packaging through `.claude-plugin/plugin.json`
 
 The shared runtime lives in `scripts/pythia_sim_server.py`.
 
@@ -80,6 +81,29 @@ You can validate the extension manifest locally with:
 gemini extensions validate .
 ```
 
+## Claude Code Install
+
+Development flow:
+
+```bash
+claude --plugin-dir /path/to/pythia-sim
+```
+
+Persistent install flow:
+
+```bash
+claude plugin marketplace add /path/to/pythia-sim
+claude plugin install pythia-sim@akash009-plugins
+```
+
+Use `--plugin-dir` for local development and iteration. Use the marketplace flow when you want Claude Code to manage the plugin as an installed extension.
+
+You can validate the Claude plugin and marketplace manifests locally with:
+
+```bash
+claude plugin validate .
+```
+
 ## Configuration
 
 The fastest setup path is a single environment variable:
@@ -141,9 +165,9 @@ The existing Codex packaging remains in place:
 - `.mcp.json`
 - `skills/pythia-sim/SKILL.md`
 
-Codex and Gemini CLI both use the same MCP tool surface.
+Codex, Gemini CLI, and Claude Code all use the same MCP tool surface.
 
-If you publish this on GitHub for `gemini extensions install https://github.com/xyz/abc`, keep the extension manifest `name` aligned with the installed directory name. The safest public layout is a repository named `pythia-sim`, matching `gemini-extension.json`.
+If you publish this on GitHub for `gemini extensions install https://github.com/xyz/abc`, keep the extension manifest `name` aligned with the installed directory name. The safest public layout is a repository named `pythia-sim`, matching `gemini-extension.json`, `.claude-plugin/plugin.json`, and the Claude marketplace entry that points to `./`.
 
 ## Development
 
@@ -156,6 +180,7 @@ pytest -q
 Manual acceptance flow:
 
 1. `gemini extensions link .`
-2. Restart the host.
-3. Confirm the extension appears.
-4. Ask it to list roots, search examples, run a tiny standalone simulation, and summarize an event record.
+2. `claude --plugin-dir .`
+3. Restart or launch the host you are testing.
+4. Confirm the extension or plugin appears.
+5. Ask it to list roots, search examples, run a tiny standalone simulation, and summarize an event record.

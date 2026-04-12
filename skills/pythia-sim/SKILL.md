@@ -1,6 +1,6 @@
 ---
 name: pythia-sim
-description: Use when the user wants to run or inspect a standalone Pythia 8 simulation from Codex. Prefer the bundled MCP tools over ad hoc shell commands when the task is pure standalone Pythia without FastJet, HepMC, ROOT, LHAPDF, or other external HEP integrations.
+description: Use when the user wants to run or inspect a standalone Pythia 8 simulation through the bundled MCP tools. Prefer them over ad hoc shell commands when the task is pure standalone Pythia without FastJet, HepMC, ROOT, LHAPDF, or other external HEP integrations.
 ---
 
 # Pythia Sim

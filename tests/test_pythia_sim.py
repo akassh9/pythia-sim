@@ -1107,11 +1107,18 @@ def test_server_tool_list_includes_event_record_introspection_tools() -> None:
 
 def test_manifest_metadata_matches_server_identity() -> None:
     codex_manifest = json.loads((PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    claude_manifest = json.loads((PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     gemini_manifest = json.loads((PLUGIN_ROOT / "gemini-extension.json").read_text(encoding="utf-8"))
 
-    assert codex_manifest["name"] == server.SERVER_NAME == gemini_manifest["name"]
-    assert codex_manifest["version"] == server.SERVER_VERSION == gemini_manifest["version"]
-    assert gemini_manifest["description"] == codex_manifest["description"]
+    assert codex_manifest["name"] == server.SERVER_NAME == gemini_manifest["name"] == claude_manifest["name"]
+    assert (
+        codex_manifest["version"] == server.SERVER_VERSION == gemini_manifest["version"] == claude_manifest["version"]
+    )
+    assert gemini_manifest["description"] == codex_manifest["description"] == claude_manifest["description"]
+    assert claude_manifest["author"] == codex_manifest["author"]
+    assert claude_manifest["keywords"] == codex_manifest["keywords"]
+    assert claude_manifest["skills"] == "./skills/"
+    assert claude_manifest["mcpServers"] == "./.mcp.json"
     assert gemini_manifest["contextFileName"] == "GEMINI.md"
     assert gemini_manifest["mcpServers"]["pythia-sim"]["command"] == "python3"
     assert gemini_manifest["mcpServers"]["pythia-sim"]["args"] == [
@@ -1121,14 +1128,34 @@ def test_manifest_metadata_matches_server_identity() -> None:
 
 def test_mcp_config_matches_packaging_entrypoints() -> None:
     codex_manifest = json.loads((PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    claude_manifest = json.loads((PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     gemini_manifest = json.loads((PLUGIN_ROOT / "gemini-extension.json").read_text(encoding="utf-8"))
     mcp_config = json.loads((PLUGIN_ROOT / ".mcp.json").read_text(encoding="utf-8"))
 
     assert codex_manifest["mcpServers"] == "./.mcp.json"
+    assert claude_manifest["mcpServers"] == "./.mcp.json"
     assert "pythia-sim" in gemini_manifest["mcpServers"]
     assert mcp_config["mcpServers"]["pythia-sim"]["command"] == "python3"
     assert mcp_config["mcpServers"]["pythia-sim"]["args"] == ["./scripts/pythia_sim_server.py"]
     assert mcp_config["mcpServers"]["pythia-sim"]["cwd"] == "./"
+
+
+def test_claude_marketplace_manifest_points_to_repo_root_plugin() -> None:
+    marketplace_manifest = json.loads((PLUGIN_ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+
+    assert marketplace_manifest["name"] == "akash009-plugins"
+    assert marketplace_manifest["owner"] == {"name": "akash009"}
+    assert marketplace_manifest["metadata"]["description"]
+    assert marketplace_manifest["plugins"] == [
+        {
+            "name": server.SERVER_NAME,
+            "source": "./",
+            "description": "Run standalone Pythia 8 simulations through a local stdio MCP server.",
+            "version": server.SERVER_VERSION,
+            "author": {"name": "akash009"},
+            "keywords": ["pythia", "hep", "simulation", "mcp"],
+        }
+    ]
 
 
 def test_gemini_manifest_has_no_install_time_settings() -> None:

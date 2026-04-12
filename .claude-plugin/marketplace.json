@@ -1,0 +1,27 @@
+{
+  "name": "akash009-plugins",
+  "owner": {
+    "name": "akash009"
+  },
+  "metadata": {
+    "description": "Physics and simulation plugins for Claude Code.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "pythia-sim",
+      "source": "./",
+      "description": "Run standalone Pythia 8 simulations through a local stdio MCP server.",
+      "version": "0.1.0",
+      "author": {
+        "name": "akash009"
+      },
+      "keywords": [
+        "pythia",
+        "hep",
+        "simulation",
+        "mcp"
+      ]
+    }
+  ]
+}
