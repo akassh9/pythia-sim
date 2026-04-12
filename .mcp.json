@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "pythia-sim": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "./scripts/pythia_sim_server.py"
+      ],
+      "cwd": "./",
+      "startup_timeout_sec": 5,
+      "tool_timeout_sec": 1200,
+      "note": "Local stdio MCP server for standalone Pythia 8 simulations."
+    }
+  }
+}

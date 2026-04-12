@@ -1,0 +1,9 @@
+{
+  "default_alias": "pythia8317",
+  "roots": [
+    {
+      "alias": "pythia8317",
+      "path": "/absolute/path/to/pythia8317"
+    }
+  ]
+}

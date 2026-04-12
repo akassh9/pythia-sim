@@ -1,0 +1,35 @@
+{
+  "name": "pythia-sim",
+  "version": "0.1.0",
+  "description": "Run standalone Pythia 8 simulations through a local stdio MCP server.",
+  "author": {
+    "name": "akash009"
+  },
+  "keywords": [
+    "pythia",
+    "hep",
+    "simulation",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Pythia Sim",
+    "shortDescription": "Run standalone Pythia 8 simulations from Codex without manual shell setup",
+    "longDescription": "Use a local stdio MCP server to inspect configured Pythia roots, auto-build standalone libraries when needed, compile standalone C++ snippets, and run simulations with preserved failure artifacts.",
+    "developerName": "akash009",
+    "category": "Coding",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Run a standalone Pythia 8 simulation and summarize the output",
+      "List my configured Pythia roots and tell me which one is ready",
+      "Compile this standalone Pythia example and explain any diagnostics"
+    ],
+    "brandColor": "#0F4C5C",
+    "screenshots": []
+  }
+}

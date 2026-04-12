@@ -1,0 +1,15 @@
+{
+  "name": "pythia-sim",
+  "version": "0.1.0",
+  "contextFileName": "GEMINI.md",
+  "mcpServers": {
+    "pythia-sim": {
+      "command": "python3",
+      "args": [
+        "${extensionPath}${/}scripts${/}pythia_sim_server.py"
+      ],
+      "cwd": "${extensionPath}",
+      "timeout": 1200000
+    }
+  }
+}
