@@ -64,8 +64,9 @@ There is no install-time questionnaire anymore. The intended flow is:
 
 1. Install the extension from GitHub.
 2. Trust the workspace with `gemini trust`.
-3. If the machine does not already have a configured Pythia checkout, ask Gemini to use `bootstrap_pythia`.
-4. If you already manage your own Pythia installs, optionally configure them through environment variables or a registry file.
+3. Let Gemini try `list_pythia_roots` first. The extension now auto-detects common local Pythia installs before it concludes nothing is configured.
+4. If no usable install is found, ask Gemini to use `bootstrap_pythia`.
+5. If you already manage your own Pythia installs, optionally configure them through environment variables or a registry file.
 
 Gemini CLI requires trusted workspaces for stdio MCP servers. In any workspace where you want the extension to run:
 
@@ -87,7 +88,7 @@ The fastest setup path is a single environment variable:
 export PYTHIA_SIM_ROOT=/path/to/pythia
 ```
 
-If nothing is configured yet, the extension can bootstrap its own local standalone Pythia installation through the `bootstrap_pythia` MCP tool.
+If nothing is configured yet, the extension first tries to auto-detect a usable local Pythia install. It currently probes `PYTHIA8DATA`, `pythia8-config`, common Homebrew prefixes, and a small set of `~/pythia*` / `~/src/pythia*` checkouts. If no usable install is found, the extension can bootstrap its own local standalone Pythia installation through the `bootstrap_pythia` MCP tool.
 
 Optional environment variables:
 
@@ -103,6 +104,7 @@ Registry discovery order:
 4. macOS fallback: `~/.pythia-sim/roots.json`
 5. Linux fallback: `~/.config/pythia-sim/roots.json`
 6. Legacy repo-local `config/roots.json`
+7. Auto-detected local Pythia installs when no explicit config is present
 
 State directory resolution order:
 

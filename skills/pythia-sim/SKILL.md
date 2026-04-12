@@ -23,7 +23,7 @@ Do not use it when the task needs:
 
 ## Workflow
 
-1. Call `list_pythia_roots` if you need to confirm which checkout is ready.
+1. Call `list_pythia_roots` if you need to confirm which checkout is ready; this may surface an auto-detected local install even when no registry was configured.
 2. Call `search_pythia_examples` on demand if example `.cc` or `.cmnd` context would help code generation or debugging.
 3. Call `run_pythia_simulation` with raw standalone C++ source.
 4. Pass `.cmnd` or other text companion files only through `supporting_files`.

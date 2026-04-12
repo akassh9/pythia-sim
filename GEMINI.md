@@ -28,8 +28,8 @@ This extension is text-only for user-visible output.
 
 ## Workflow
 
-1. Use `list_pythia_roots` to confirm which checkout is configured and ready.
-2. If no root is configured, use `bootstrap_pythia` to download, build, and register a local standalone Pythia install.
+1. Use `list_pythia_roots` first to confirm which checkout is configured or auto-detected and ready.
+2. If no usable root is available, use `bootstrap_pythia` to first reuse a detected local checkout when possible, otherwise download, build, and register a local standalone Pythia install.
 3. Use `search_pythia_examples` when example `.cc` or `.cmnd` context would help.
 4. Use `run_pythia_simulation` for raw standalone C++ execution.
 5. Use `summarize_event_record`, `trace_particle_lineage`, `find_decay_chain`, and `explain_status_codes` for structured event-record analysis.

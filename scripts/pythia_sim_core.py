@@ -301,6 +301,23 @@ class RootRegistry:
     roots: dict[str, RootEntry]
 
 
+@dataclass(frozen=True)
+class RootLayout:
+    include_dir: Path | None
+    lib_dir: Path | None
+    xmldoc_dir: Path | None
+    examples_dir: Path | None
+    makefile_inc_path: Path | None
+    configure_path: Path | None
+    build_status: str
+
+
+@dataclass(frozen=True)
+class DetectedPythiaRoot:
+    path: Path
+    detection_method: str
+
+
 @dataclass
 class SupportingFile:
     name: str
@@ -1480,6 +1497,186 @@ def _load_registry_from_env_root(env: Mapping[str, str]) -> RootRegistry | None:
     return RootRegistry(default_alias=alias, roots={alias: entry})
 
 
+def _root_makefile_inc_path(root_path: Path) -> Path | None:
+    makefile_path = root_path / "Makefile.inc"
+    if makefile_path.is_file():
+        return makefile_path
+    return None
+
+
+def _root_include_dir(root_path: Path) -> Path | None:
+    include_dir = root_path / "include"
+    if (include_dir / "Pythia8" / "Pythia.h").is_file():
+        return include_dir
+    return None
+
+
+def _root_lib_dir(root_path: Path) -> Path | None:
+    for name in ("lib", "lib64"):
+        lib_dir = root_path / name
+        if lib_dir.is_dir() and any(lib_dir.glob("libpythia8.*")):
+            return lib_dir
+    return None
+
+
+def _root_xmldoc_dir(root_path: Path) -> Path | None:
+    xmldoc_dir = root_path / "share" / "Pythia8" / "xmldoc"
+    if xmldoc_dir.is_dir():
+        return xmldoc_dir
+    return None
+
+
+def _root_examples_dir(root_path: Path) -> Path | None:
+    candidates = [
+        root_path / "examples",
+        root_path / "share" / "Pythia8" / "examples",
+    ]
+    for examples_dir in candidates:
+        if examples_dir.is_dir() and (examples_dir / "Makefile").is_file():
+            return examples_dir
+    return None
+
+
+def describe_root_layout(root_path: Path) -> RootLayout:
+    include_dir = _root_include_dir(root_path)
+    lib_dir = _root_lib_dir(root_path)
+    xmldoc_dir = _root_xmldoc_dir(root_path)
+    examples_dir = _root_examples_dir(root_path)
+    makefile_inc_path = _root_makefile_inc_path(root_path)
+    configure_path = root_path / "configure"
+    if not configure_path.is_file():
+        configure_path = None
+
+    build_status = "invalid_root"
+    if include_dir is not None and xmldoc_dir is not None:
+        if lib_dir is not None:
+            build_status = "ready"
+        elif makefile_inc_path is not None:
+            build_status = "needs_build"
+        elif examples_dir is not None or configure_path is not None:
+            build_status = "needs_bootstrap"
+
+    return RootLayout(
+        include_dir=include_dir,
+        lib_dir=lib_dir,
+        xmldoc_dir=xmldoc_dir,
+        examples_dir=examples_dir,
+        makefile_inc_path=makefile_inc_path,
+        configure_path=configure_path,
+        build_status=build_status,
+    )
+
+
+def _autodetected_alias_for_path(root_path: Path) -> str:
+    name = root_path.name.strip()
+    if name and re.fullmatch(r"[A-Za-z0-9._-]+", name) and "pythia" in name.lower():
+        return name
+    return "autodetected"
+
+
+def _autodetected_registry_for_path(root_path: Path) -> RootRegistry:
+    alias = _autodetected_alias_for_path(root_path)
+    entry = RootEntry(
+        alias=alias,
+        path=root_path,
+        build_command=list(DEFAULT_BUILD_COMMAND),
+    )
+    return RootRegistry(default_alias=alias, roots={alias: entry})
+
+
+def _infer_root_from_xmldoc_path(raw_path: str) -> Path | None:
+    xmldoc_dir = Path(raw_path).expanduser()
+    try:
+        resolved = xmldoc_dir.resolve()
+    except OSError:
+        return None
+    if resolved.name != "xmldoc":
+        return None
+    if resolved.parent.name != "Pythia8":
+        return None
+    if resolved.parent.parent.name != "share":
+        return None
+    return resolved.parent.parent.parent
+
+
+def _query_pythia8_config_root(config_path: Path, env: Mapping[str, str]) -> Path | None:
+    for args in (["--prefix"], ["--xmldoc"]):
+        try:
+            completed = subprocess.run(
+                [str(config_path), *args],
+                capture_output=True,
+                check=False,
+                env=dict(env),
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if completed.returncode != 0:
+            continue
+        output = completed.stdout.strip()
+        if not output:
+            continue
+        if args == ["--prefix"]:
+            try:
+                return Path(output).expanduser().resolve()
+            except OSError:
+                continue
+        inferred = _infer_root_from_xmldoc_path(output)
+        if inferred is not None:
+            return inferred
+    return None
+
+
+def autodetect_pythia_root(env: Mapping[str, str] | None = None) -> DetectedPythiaRoot | None:
+    env_map = os.environ if env is None else env
+    candidates: list[tuple[Path, str]] = []
+
+    raw_xmldoc = env_map.get("PYTHIA8DATA")
+    if isinstance(raw_xmldoc, str) and raw_xmldoc.strip():
+        inferred = _infer_root_from_xmldoc_path(raw_xmldoc.strip())
+        if inferred is not None:
+            candidates.append((inferred, "PYTHIA8DATA"))
+
+    config_path_raw = shutil.which("pythia8-config", path=env_map.get("PATH"))
+    if config_path_raw:
+        config_path = Path(config_path_raw).resolve()
+        queried_root = _query_pythia8_config_root(config_path, env_map)
+        if queried_root is not None:
+            candidates.append((queried_root, "pythia8-config --prefix"))
+        candidates.append((config_path.parent.parent.resolve(), "pythia8-config location"))
+
+    for prefix in (
+        Path("/opt/homebrew/opt/pythia"),
+        Path("/opt/homebrew/opt/pythia8"),
+        Path("/usr/local/opt/pythia"),
+        Path("/usr/local/opt/pythia8"),
+    ):
+        candidates.append((prefix, "common install prefix"))
+
+    home = Path.home()
+    for pattern in ("pythia*",):
+        for candidate in home.glob(pattern):
+            if candidate.is_dir():
+                candidates.append((candidate.resolve(), "home directory"))
+        src_dir = home / "src"
+        if src_dir.is_dir():
+            for candidate in src_dir.glob(pattern):
+                if candidate.is_dir():
+                    candidates.append((candidate.resolve(), "home src"))
+
+    seen: set[Path] = set()
+    for candidate_path, detection_method in candidates:
+        resolved = candidate_path.expanduser().resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if describe_root_layout(resolved).build_status == "invalid_root":
+            continue
+        return DetectedPythiaRoot(path=resolved, detection_method=detection_method)
+    return None
+
+
 def _candidate_registry_paths(
     *, plugin_root: Path, env: Mapping[str, str], platform: str
 ) -> list[Path]:
@@ -1530,9 +1727,13 @@ def load_registry(
         if candidate.is_file():
             return _load_registry_file(candidate)
 
-    searched = "\n".join(f"- {path}" for path in candidates)
+    autodetected_root = autodetect_pythia_root(env_map)
+    if autodetected_root is not None:
+        return _autodetected_registry_for_path(autodetected_root.path)
+
     raise PythiaSimError(
         "Registry file not found. Pythia 8 is not installed or configured. "
+        "No usable local Pythia installation was auto-detected. "
         "Please use the `bootstrap_pythia` tool to automatically download, compile, and configure a local installation."
     )
 
@@ -1556,6 +1757,27 @@ def parse_makefile_inc(makefile_path: Path) -> dict[str, str]:
         missing_text = ", ".join(missing)
         raise PythiaSimError(f"{makefile_path} is missing required fields: {missing_text}.")
     return values
+
+
+def _synthesized_make_vars(root: RootEntry, layout: RootLayout) -> dict[str, str]:
+    if layout.include_dir is None or layout.lib_dir is None:
+        raise PythiaSimError(
+            f"Configured root '{root.alias}' is missing the include/lib layout required for direct compilation."
+        )
+    return {
+        "CXX": os.environ.get("CXX", "c++"),
+        "PREFIX_INCLUDE": str(layout.include_dir),
+        "PREFIX_LIB": str(layout.lib_dir),
+        "CXX_COMMON": "-O2 -std=c++11 -Wall",
+        "OBJ_COMMON": "",
+    }
+
+
+def resolve_make_vars(root: RootEntry, layout: RootLayout | None = None) -> dict[str, str]:
+    layout = describe_root_layout(root.path) if layout is None else layout
+    if layout.makefile_inc_path is not None:
+        return parse_makefile_inc(layout.makefile_inc_path)
+    return _synthesized_make_vars(root, layout)
 
 
 def validate_source_cpp(source_cpp: str) -> None:
@@ -1692,36 +1914,22 @@ def _event_record_summary_payload(bundle: dict[str, Any]) -> dict[str, Any]:
 
 
 def inspect_root(root: RootEntry) -> dict[str, Any]:
-    makefile_path = root.path / "Makefile.inc"
-    root_valid = (
-        root.path.is_dir()
-        and (root.path / "include" / "Pythia8" / "Pythia.h").is_file()
-        and (root.path / "examples" / "Makefile").is_file()
-    )
+    layout = describe_root_layout(root.path)
     compiler = None
-    build_status = "invalid_root"
-    if root_valid:
-        if makefile_path.is_file():
-            try:
-                compiler = parse_makefile_inc(makefile_path).get("CXX")
-            except PythiaSimError:
-                compiler = None
-            libs_present = any((root.path / "lib").glob("libpythia8.*"))
-            if libs_present:
-                build_status = "ready"
-            else:
-                build_status = "needs_build"
-        else:
-            build_status = "needs_bootstrap"
+    if layout.makefile_inc_path is not None:
+        try:
+            compiler = parse_makefile_inc(layout.makefile_inc_path).get("CXX")
+        except PythiaSimError:
+            compiler = None
     standalone_execution_available = (
-        root_valid
-        and build_status == "ready"
-        and (root.path / "share" / "Pythia8" / "xmldoc").is_dir()
+        layout.build_status == "ready"
+        and layout.include_dir is not None
+        and layout.xmldoc_dir is not None
     )
     return {
         "alias": root.alias,
         "path": str(root.path),
-        "build_status": build_status,
+        "build_status": layout.build_status,
         "detected_compiler": compiler,
         "standalone_execution_available": standalone_execution_available,
     }
@@ -1730,15 +1938,11 @@ def inspect_root(root: RootEntry) -> dict[str, Any]:
 def _resolve_examples_dir(root: RootEntry) -> Path:
     if not root.path.is_dir():
         raise PythiaSimError(f"Configured root '{root.alias}' does not exist: {root.path}")
-    examples_dir = root.path / "examples"
-    if not examples_dir.is_dir():
+    examples_dir = describe_root_layout(root.path).examples_dir
+    if examples_dir is None:
         raise PythiaSimError(
-            f"Configured root '{root.alias}' is missing the examples directory: {examples_dir}"
-        )
-    makefile_path = examples_dir / "Makefile"
-    if not makefile_path.is_file():
-        raise PythiaSimError(
-            f"Configured root '{root.alias}' is missing the examples Makefile: {makefile_path}"
+            f"Configured root '{root.alias}' does not expose a usable examples directory under "
+            f"{root.path / 'examples'} or {root.path / 'share' / 'Pythia8' / 'examples'}."
         )
     return examples_dir
 
@@ -2340,6 +2544,51 @@ def _run_subprocess_capped(
     )
 
 
+def _run_configure_and_make(
+    *,
+    root_path: Path,
+    build_command: list[str],
+    env: dict[str, str],
+    max_output_bytes: int,
+) -> CommandExecution:
+    configure_result = _run_subprocess_capped(
+        ["./configure"],
+        cwd=root_path,
+        env=env,
+        timeout_sec=120,
+        max_output_bytes=max_output_bytes,
+    )
+    stdout = _format_stage_output("configure stdout", configure_result.stdout)
+    stderr = _format_stage_output("configure stderr", configure_result.stderr)
+    if configure_result.exit_code != 0 or configure_result.timed_out:
+        return CommandExecution(
+            command=["./configure"],
+            exit_code=configure_result.exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            timed_out=configure_result.timed_out,
+            output_capped=configure_result.output_capped,
+        )
+
+    make_result = _run_subprocess_capped(
+        build_command,
+        cwd=root_path,
+        env=env,
+        timeout_sec=AUTO_BUILD_TIMEOUT_SEC,
+        max_output_bytes=max_output_bytes,
+    )
+    stdout += _format_stage_output("make stdout", make_result.stdout)
+    stderr += _format_stage_output("make stderr", make_result.stderr)
+    return CommandExecution(
+        command=["./configure", "&&", *build_command],
+        exit_code=make_result.exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        timed_out=make_result.timed_out,
+        output_capped=configure_result.output_capped or make_result.output_capped,
+    )
+
+
 class PythiaSimulationRunner:
     def __init__(
         self,
@@ -2369,73 +2618,158 @@ class PythiaSimulationRunner:
         }
 
     def bootstrap_pythia(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        env = os.environ.copy()
         vendor_dir = self.state_root / "vendor"
         vendor_dir.mkdir(parents=True, exist_ok=True)
         pythia_dir = vendor_dir / PYTHIA_AUTO_ALIAS
 
         logs = []
-        logs.append(f"Target directory: {pythia_dir}")
+        detected = autodetect_pythia_root(env)
+        selected_alias = PYTHIA_AUTO_ALIAS
+        selected_root = pythia_dir
 
-        if pythia_dir.exists() and (pythia_dir / "Makefile.inc").exists():
-            logs.append("Pythia 8 is already installed.")
+        if detected is not None and detected.path != pythia_dir:
+            selected_root = detected.path
+            selected_alias = _autodetected_alias_for_path(detected.path)
+            logs.append(
+                f"Detected existing Pythia root via {detected.detection_method}: {detected.path}"
+            )
+            layout = describe_root_layout(detected.path)
+            if layout.build_status == "ready":
+                logs.append("Using detected installation; download skipped.")
+            elif layout.build_status == "needs_build":
+                logs.append("Detected checkout needs a build; compiling in place.")
+                make_result = _run_subprocess_capped(
+                    list(DEFAULT_BUILD_COMMAND),
+                    cwd=detected.path,
+                    env=env,
+                    timeout_sec=AUTO_BUILD_TIMEOUT_SEC,
+                    max_output_bytes=MAX_OUTPUT_BYTES,
+                )
+                logs.append(f"Build stdout: {make_result.stdout}")
+                if make_result.exit_code != 0:
+                    logs.append(f"Build stderr: {make_result.stderr}")
+                    raise PythiaSimError(
+                        f"Build failed with exit code {make_result.exit_code}.\n" + "\n".join(logs)
+                    )
+                if describe_root_layout(detected.path).lib_dir is None:
+                    raise PythiaSimError(
+                        "Detected Pythia checkout finished building but did not produce libpythia8."
+                    )
+                logs.append("Build successful.")
+            elif layout.build_status == "needs_bootstrap":
+                logs.append("Detected checkout needs configure + build; bootstrapping in place.")
+                bootstrap_result = _run_configure_and_make(
+                    root_path=detected.path,
+                    build_command=["make", "-j4"],
+                    env=env,
+                    max_output_bytes=MAX_OUTPUT_BYTES,
+                )
+                logs.append(f"Bootstrap stdout: {bootstrap_result.stdout}")
+                if bootstrap_result.exit_code != 0:
+                    logs.append(f"Bootstrap stderr: {bootstrap_result.stderr}")
+                    raise PythiaSimError(
+                        f"Bootstrap failed with exit code {bootstrap_result.exit_code}.\n"
+                        + "\n".join(logs)
+                    )
+                if describe_root_layout(detected.path).lib_dir is None:
+                    raise PythiaSimError(
+                        "Detected Pythia checkout finished bootstrapping but did not produce libpythia8."
+                    )
+                logs.append("Bootstrap successful.")
         else:
-            if pythia_dir.exists():
-                shutil.rmtree(pythia_dir)
+            logs.append(f"Target directory: {pythia_dir}")
+            existing_layout = describe_root_layout(pythia_dir) if pythia_dir.exists() else None
+            if existing_layout is not None and existing_layout.build_status == "ready":
+                logs.append("Pythia 8 is already installed.")
+            elif existing_layout is not None and existing_layout.build_status == "needs_build":
+                logs.append("Existing vendored checkout needs a build; compiling in place.")
+                make_result = _run_subprocess_capped(
+                    ["make", "-j4"],
+                    cwd=pythia_dir,
+                    env=env,
+                    timeout_sec=AUTO_BUILD_TIMEOUT_SEC,
+                    max_output_bytes=MAX_OUTPUT_BYTES,
+                )
+                logs.append(f"Build stdout: {make_result.stdout}")
+                if make_result.exit_code != 0:
+                    logs.append(f"Build stderr: {make_result.stderr}")
+                    raise PythiaSimError(
+                        f"Build failed with exit code {make_result.exit_code}.\n" + "\n".join(logs)
+                    )
+                if describe_root_layout(pythia_dir).lib_dir is None:
+                    raise PythiaSimError(
+                        "Vendored Pythia checkout finished building but did not produce libpythia8."
+                    )
+                logs.append("Build successful.")
+            elif existing_layout is not None and existing_layout.build_status == "needs_bootstrap":
+                logs.append("Existing vendored checkout needs configure + build; bootstrapping in place.")
+                bootstrap_result = _run_configure_and_make(
+                    root_path=pythia_dir,
+                    build_command=["make", "-j4"],
+                    env=env,
+                    max_output_bytes=MAX_OUTPUT_BYTES,
+                )
+                logs.append(f"Bootstrap stdout: {bootstrap_result.stdout}")
+                if bootstrap_result.exit_code != 0:
+                    logs.append(f"Bootstrap stderr: {bootstrap_result.stderr}")
+                    raise PythiaSimError(
+                        f"Bootstrap failed with exit code {bootstrap_result.exit_code}.\n"
+                        + "\n".join(logs)
+                    )
+                if describe_root_layout(pythia_dir).lib_dir is None:
+                    raise PythiaSimError(
+                        "Vendored Pythia checkout finished bootstrapping but did not produce libpythia8."
+                    )
+                logs.append("Compilation successful.")
+            else:
+                if pythia_dir.exists():
+                    shutil.rmtree(pythia_dir)
 
-            tarball_path = vendor_dir / f"{PYTHIA_AUTO_ALIAS}.tgz"
-            logs.append(f"Downloading Pythia 8 from {PYTHIA_DOWNLOAD_URL}...")
-            try:
-                urllib.request.urlretrieve(PYTHIA_DOWNLOAD_URL, tarball_path)
-            except Exception as exc:
-                raise PythiaSimError(f"Failed to download Pythia 8: {exc}")
+                tarball_path = vendor_dir / f"{PYTHIA_AUTO_ALIAS}.tgz"
+                logs.append(f"Downloading Pythia 8 from {PYTHIA_DOWNLOAD_URL}...")
+                try:
+                    urllib.request.urlretrieve(PYTHIA_DOWNLOAD_URL, tarball_path)
+                except Exception as exc:
+                    raise PythiaSimError(f"Failed to download Pythia 8: {exc}")
 
-            logs.append("Extracting tarball...")
-            try:
-                with tarfile.open(tarball_path, "r:gz") as tar:
-                    tar.extractall(path=vendor_dir)
-            except Exception as exc:
-                raise PythiaSimError(f"Failed to extract tarball: {exc}")
-            finally:
-                if tarball_path.exists():
-                    tarball_path.unlink()
+                logs.append("Extracting tarball...")
+                try:
+                    with tarfile.open(tarball_path, "r:gz") as tar:
+                        tar.extractall(path=vendor_dir)
+                except Exception as exc:
+                    raise PythiaSimError(f"Failed to extract tarball: {exc}")
+                finally:
+                    if tarball_path.exists():
+                        tarball_path.unlink()
 
-            logs.append("Configuring Pythia 8...")
-            config_result = _run_subprocess_capped(
-                ["./configure"],
-                cwd=pythia_dir,
-                env=os.environ.copy(),
-                timeout_sec=120,
-                max_output_bytes=MAX_OUTPUT_BYTES,
-            )
-            logs.append(f"Configure stdout: {config_result.stdout}")
-            if config_result.exit_code != 0:
-                logs.append(f"Configure stderr: {config_result.stderr}")
-                raise PythiaSimError(f"Configure failed with exit code {config_result.exit_code}.\n" + "\n".join(logs))
-
-            logs.append("Compiling Pythia 8 (this may take a few minutes)...")
-            make_result = _run_subprocess_capped(
-                ["make", "-j4"],
-                cwd=pythia_dir,
-                env=os.environ.copy(),
-                timeout_sec=600,
-                max_output_bytes=MAX_OUTPUT_BYTES,
-            )
-            if make_result.exit_code != 0:
-                logs.append(f"Make stderr: {make_result.stderr}")
-                raise PythiaSimError(f"Make failed with exit code {make_result.exit_code}.\n" + "\n".join(logs))
-            logs.append("Compilation successful.")
+                logs.append("Configuring and compiling Pythia 8...")
+                bootstrap_result = _run_configure_and_make(
+                    root_path=pythia_dir,
+                    build_command=["make", "-j4"],
+                    env=env,
+                    max_output_bytes=MAX_OUTPUT_BYTES,
+                )
+                logs.append(f"Bootstrap stdout: {bootstrap_result.stdout}")
+                if bootstrap_result.exit_code != 0:
+                    logs.append(f"Bootstrap stderr: {bootstrap_result.stderr}")
+                    raise PythiaSimError(
+                        f"Bootstrap failed with exit code {bootstrap_result.exit_code}.\n"
+                        + "\n".join(logs)
+                    )
+                logs.append("Compilation successful.")
 
         registry_file = _candidate_registry_paths(
-            plugin_root=self.plugin_root, env=os.environ, platform=_current_platform()
+            plugin_root=self.plugin_root, env=env, platform=_current_platform()
         )[0]
         registry_file.parent.mkdir(parents=True, exist_ok=True)
-        
+
         registry_data = {
-            "default_alias": PYTHIA_AUTO_ALIAS,
+            "default_alias": selected_alias,
             "roots": [
                 {
-                    "alias": PYTHIA_AUTO_ALIAS,
-                    "path": str(pythia_dir),
+                    "alias": selected_alias,
+                    "path": str(selected_root),
                 }
             ]
         }
@@ -2444,8 +2778,8 @@ class PythiaSimulationRunner:
 
         return {
             "ok": True,
-            "alias": PYTHIA_AUTO_ALIAS,
-            "path": str(pythia_dir),
+            "alias": selected_alias,
+            "path": str(selected_root),
             "registry_path": str(registry_file),
             "logs": "\n".join(logs)
         }
@@ -2819,19 +3153,22 @@ class PythiaSimulationRunner:
             _artifact_helper_header_source(), encoding="utf-8"
         )
 
-    def _assert_valid_root(self, root: RootEntry) -> None:
+    def _assert_valid_root(self, root: RootEntry) -> RootLayout:
+        layout = describe_root_layout(root.path)
         if not root.path.is_dir():
             raise PythiaSimError(f"Configured root '{root.alias}' does not exist: {root.path}")
-        required_paths = [
-            root.path / "include" / "Pythia8" / "Pythia.h",
-            root.path / "examples" / "Makefile",
-            root.path / "share" / "Pythia8" / "xmldoc",
-        ]
-        missing = [str(path) for path in required_paths if not path.exists()]
+        missing: list[str] = []
+        if layout.include_dir is None:
+            missing.append(str(root.path / "include" / "Pythia8" / "Pythia.h"))
+        if layout.xmldoc_dir is None:
+            missing.append(str(root.path / "share" / "Pythia8" / "xmldoc"))
+        if layout.build_status == "invalid_root":
+            missing.append("either built libpythia8 or a buildable checkout layout")
         if missing:
             raise PythiaSimError(
                 f"Configured root '{root.alias}' does not look like a standalone Pythia checkout. Missing: {', '.join(missing)}"
             )
+        return layout
 
     def _select_root(self, root_alias: str | None) -> RootEntry:
         registry = load_registry(self.registry_path, plugin_root=self.plugin_root)
@@ -2847,34 +3184,49 @@ class PythiaSimulationRunner:
         *,
         max_output_bytes: int,
     ) -> tuple[dict[str, str], bool, CommandExecution | None]:
-        self._assert_valid_root(root)
-        makefile_path = root.path / "Makefile.inc"
-        make_vars = parse_makefile_inc(makefile_path)
-        libs_present = any((root.path / "lib").glob("libpythia8.*"))
-        if libs_present:
-            return make_vars, False, None
+        layout = self._assert_valid_root(root)
+        if layout.lib_dir is not None:
+            return resolve_make_vars(root, layout), False, None
 
+        bootstrap_performed = False
+        bootstrap_result: CommandExecution | None = None
         with self._bootstrap_lock(root.alias):
-            libs_present = any((root.path / "lib").glob("libpythia8.*"))
-            if libs_present:
-                return make_vars, False, None
-            build_result = _run_subprocess_capped(
-                root.build_command,
-                cwd=root.path,
-                env=os.environ.copy(),
-                timeout_sec=AUTO_BUILD_TIMEOUT_SEC,
-                max_output_bytes=max_output_bytes,
-            )
-            if build_result.exit_code != 0 or build_result.timed_out:
-                return make_vars, True, build_result
-            if not any((root.path / "lib").glob("libpythia8.*")):
-                build_result.stderr = (
-                    build_result.stderr
+            layout = describe_root_layout(root.path)
+            if layout.lib_dir is not None:
+                return resolve_make_vars(root, layout), False, None
+            if layout.makefile_inc_path is None:
+                if layout.configure_path is None:
+                    raise PythiaSimError(
+                        f"Configured root '{root.alias}' is not built and does not provide ./configure."
+                    )
+                bootstrap_result = _run_configure_and_make(
+                    root_path=root.path,
+                    build_command=root.build_command,
+                    env=os.environ.copy(),
+                    max_output_bytes=max_output_bytes,
+                )
+            else:
+                bootstrap_result = _run_subprocess_capped(
+                    root.build_command,
+                    cwd=root.path,
+                    env=os.environ.copy(),
+                    timeout_sec=AUTO_BUILD_TIMEOUT_SEC,
+                    max_output_bytes=max_output_bytes,
+                )
+            bootstrap_performed = True
+            if bootstrap_result.exit_code != 0 or bootstrap_result.timed_out:
+                return {}, bootstrap_performed, bootstrap_result
+            layout = describe_root_layout(root.path)
+            if layout.lib_dir is None:
+                assert bootstrap_result is not None
+                bootstrap_result.stderr = (
+                    bootstrap_result.stderr
                     + "\n[pythia-sim] Build command completed but lib/libpythia8.* was not produced.\n"
                 )
-                build_result.exit_code = build_result.exit_code or 1
-                return make_vars, True, build_result
-        return make_vars, True, None
+                bootstrap_result.exit_code = bootstrap_result.exit_code or 1
+                return {}, bootstrap_performed, bootstrap_result
+
+        return resolve_make_vars(root, layout), bootstrap_performed, None
 
     def _copy_failed_artifacts(
         self,
@@ -3093,7 +3445,9 @@ class PythiaSimulationRunner:
             )
 
         env = os.environ.copy()
-        env["PYTHIA8DATA"] = str(root.path / "share" / "Pythia8" / "xmldoc")
+        layout = describe_root_layout(root.path)
+        assert layout.xmldoc_dir is not None
+        env["PYTHIA8DATA"] = str(layout.xmldoc_dir)
         execution = _run_subprocess_capped(
             [str(executable_path)],
             cwd=run_dir,

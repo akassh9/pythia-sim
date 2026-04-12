@@ -18,8 +18,8 @@ import pythia_sim_core as core
 import pythia_sim_server as server
 
 
-def _make_fake_root(tmp_path: Path) -> Path:
-    root = tmp_path / "pythia"
+def _make_fake_root(tmp_path: Path, name: str = "pythia") -> Path:
+    root = tmp_path / name
     (root / "include" / "Pythia8").mkdir(parents=True)
     (root / "include" / "Pythia8" / "Pythia.h").write_text("// header\n", encoding="utf-8")
     (root / "examples").mkdir()
@@ -351,6 +351,34 @@ def test_load_registry_uses_macos_fallback_after_missing_xdg_path(
     assert registry.roots["mac"].path == root.resolve()
 
 
+def test_load_registry_falls_back_to_autodetected_pythia8_config(tmp_path: Path) -> None:
+    root = _make_fake_root(tmp_path, name="pythia8317")
+    config_dir = tmp_path / "bin"
+    config_dir.mkdir()
+    config_script = config_dir / "pythia8-config"
+    config_script.write_text(
+        f"""#!/bin/sh
+if [ "${{1:-}}" = "--prefix" ]; then
+  echo "{root}"
+  exit 0
+fi
+exit 1
+""",
+        encoding="utf-8",
+    )
+    config_script.chmod(0o755)
+
+    registry = core.load_registry(
+        None,
+        plugin_root=tmp_path / "plugin",
+        env={"PATH": str(config_dir)},
+        platform="linux",
+    )
+
+    assert registry.default_alias == "pythia8317"
+    assert registry.roots["pythia8317"].path == root.resolve()
+
+
 def test_resolve_state_root_prefers_override_and_platform_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -529,6 +557,67 @@ def test_search_examples_unknown_root_raises_error(tmp_path: Path) -> None:
 
     with pytest.raises(core.PythiaSimError, match="Unknown root alias"):
         runner.search_pythia_examples({"query": "HardQCD", "root_alias": "missing"})
+
+
+def test_search_examples_supports_installed_prefix_layout(tmp_path: Path) -> None:
+    root = _make_fake_root(tmp_path, name="pythia-prefix")
+    share_examples = root / "share" / "Pythia8" / "examples"
+    share_examples.mkdir(parents=True, exist_ok=True)
+    (root / "examples" / "Makefile").unlink()
+    (root / "examples").rmdir()
+    (share_examples / "Makefile").write_text("all:\n\t@true\n", encoding="utf-8")
+    (share_examples / "main101.cc").write_text(
+        'pythia.readString("HardQCD:all = on");\n',
+        encoding="utf-8",
+    )
+    _write_makefile_inc(root)
+    registry_path = _write_registry(tmp_path, root)
+    runner = core.PythiaSimulationRunner(
+        plugin_root=tmp_path / "plugin",
+        registry_path=registry_path,
+        state_root=tmp_path / "state",
+    )
+
+    payload = runner.search_pythia_examples({"query": "HardQCD"})
+
+    assert payload["returned_count"] == 1
+    assert payload["examples_path"] == str(share_examples)
+
+
+def test_bootstrap_pythia_prefers_detected_install_over_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _make_fake_root(tmp_path, name="pythia8317")
+    _write_makefile_inc(root)
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    runner = core.PythiaSimulationRunner(
+        plugin_root=plugin_root,
+        registry_path=None,
+        state_root=tmp_path / "state",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+
+    monkeypatch.setattr(
+        core,
+        "autodetect_pythia_root",
+        lambda env=None: core.DetectedPythiaRoot(
+            path=root.resolve(), detection_method="test fixture"
+        ),
+    )
+
+    def fail_download(*args: object, **kwargs: object) -> None:
+        raise AssertionError("bootstrap should not download when an install was detected")
+
+    monkeypatch.setattr(core.urllib.request, "urlretrieve", fail_download)
+    payload = runner.bootstrap_pythia({})
+
+    assert payload["alias"] == "pythia8317"
+    assert payload["path"] == str(root.resolve())
+    assert "download skipped" in payload["logs"]
+    registry = core.load_registry(Path(payload["registry_path"]))
+    assert registry.default_alias == "pythia8317"
+    assert registry.roots["pythia8317"].path == root.resolve()
 
 
 def test_success_cleanup_and_failure_preservation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
