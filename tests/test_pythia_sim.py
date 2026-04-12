@@ -317,7 +317,7 @@ def test_load_registry_uses_macos_fallback_after_missing_xdg_path(
     monkeypatch.setattr(core.Path, "home", lambda: home)
     root = _make_fake_root(tmp_path / "mac-root")
     registry_path = (
-        home / "Library" / "Application Support" / "pythia-sim" / "roots.json"
+        home / ".pythia-sim" / "roots.json"
     )
     registry_path.parent.mkdir(parents=True)
     registry_path.write_text(
@@ -361,7 +361,7 @@ def test_resolve_state_root_prefers_override_and_platform_defaults(
     monkeypatch.setattr(core.Path, "home", lambda: home)
     mac_state = core.resolve_state_root(env={}, platform="darwin")
     assert mac_state == (
-        home / "Library" / "Application Support" / "pythia-sim" / "state"
+        home / ".pythia-sim" / "state"
     ).resolve()
 
 

@@ -89,7 +89,7 @@ Registry discovery order:
 1. `PYTHIA_SIM_REGISTRY_PATH`
 2. Synthetic single-root config from `PYTHIA_SIM_ROOT`
 3. `${XDG_CONFIG_HOME}/pythia-sim/roots.json` when `XDG_CONFIG_HOME` is set
-4. macOS fallback: `~/Library/Application Support/pythia-sim/roots.json`
+4. macOS fallback: `~/.pythia-sim/roots.json`
 5. Linux fallback: `~/.config/pythia-sim/roots.json`
 6. Legacy repo-local `config/roots.json`
 
@@ -97,7 +97,7 @@ State directory resolution order:
 
 1. `PYTHIA_SIM_STATE_DIR`
 2. `${XDG_STATE_HOME}/pythia-sim` when `XDG_STATE_HOME` is set
-3. macOS fallback: `~/Library/Application Support/pythia-sim/state`
+3. macOS fallback: `~/.pythia-sim/state`
 4. Linux fallback: `~/.local/state/pythia-sim`
 
 For a multi-root or custom-build setup, start from the example registry:

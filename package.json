@@ -1,0 +1,7 @@
+{
+  "name": "pythia-sim",
+  "version": "0.1.0",
+  "description": "Pythia 8 Simulation MCP Server",
+  "private": true,
+  "scripts": {}
+}

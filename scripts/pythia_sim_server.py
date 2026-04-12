@@ -6,6 +6,7 @@ import sys
 from typing import Any
 
 from pythia_sim_core import (
+    BOOTSTRAP_PYTHIA_TOOL,
     EXPLAIN_STATUS_CODES_TOOL,
     FIND_DECAY_CHAIN_TOOL,
     LIST_ROOTS_TOOL,
@@ -20,8 +21,7 @@ from pythia_sim_core import (
 
 SERVER_NAME = "pythia-sim"
 SERVER_VERSION = "0.1.0"
-SUPPORTED_PROTOCOL_VERSIONS = (
-    "2025-11-25",
+SUPPORTED_PROTOCOL_VERSIONS = (    "2025-11-25",
     "2025-06-18",
     "2025-03-26",
     "2024-11-05",
@@ -124,6 +124,16 @@ def _summarize_roots(payload: dict[str, Any]) -> str:
         lines.append(
             f"{root['alias']}: status={status}, compiler={compiler}, standalone_execution_available={ready}, path={root['path']}"
         )
+    return "\n".join(lines)
+
+def _summarize_bootstrap(payload: dict[str, Any]) -> str:
+    lines = [
+        f"ok: {payload.get('ok', False)}",
+        f"alias: {payload.get('alias', 'unknown')}",
+        f"path: {payload.get('path', 'unknown')}",
+        f"registry_path: {payload.get('registry_path', 'unknown')}",
+    ]
+    _append_output_block(lines, "bootstrap logs", payload.get("logs"), limit=3000)
     return "\n".join(lines)
 
 
@@ -347,6 +357,7 @@ def main() -> int:
             payload = {
                 "tools": [
                     LIST_ROOTS_TOOL,
+                    BOOTSTRAP_PYTHIA_TOOL,
                     SEARCH_EXAMPLES_TOOL,
                     RUN_SIMULATION_TOOL,
                     SUMMARIZE_EVENT_RECORD_TOOL,
@@ -372,6 +383,15 @@ def main() -> int:
                     payload = {"message": str(exc)}
                     if exc.failure_artifacts_path:
                         payload["failure_artifacts_path"] = exc.failure_artifacts_path
+                    result = build_tool_result(str(exc), payload, is_error=True)
+                _write_message({"jsonrpc": "2.0", "id": message_id, "result": result})
+                continue
+            if tool_name == "bootstrap_pythia":
+                try:
+                    payload = runner.bootstrap_pythia(arguments)
+                    result = build_tool_result(_summarize_bootstrap(payload), payload)
+                except PythiaSimError as exc:
+                    payload = {"message": str(exc)}
                     result = build_tool_result(str(exc), payload, is_error=True)
                 _write_message({"jsonrpc": "2.0", "id": message_id, "result": result})
                 continue
@@ -451,3 +471,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+ 
