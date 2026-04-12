@@ -126,11 +126,97 @@ def _write_event_record_bundle(
     run_id: str = "trace123",
     *,
     decay_chain_counts: dict[str, int] | None = None,
+    exact_decay_chain_counts: dict[str, int] | None = None,
+    events: list[dict[str, object]] | None = None,
+    legacy_format: bool = False,
 ) -> Path:
     completed_dir = plugin_root / ".runs" / "completed" / run_id
     completed_dir.mkdir(parents=True, exist_ok=True)
+    default_decay_chain_counts = {"23>13": 4, "23>-13": 4}
+    collapsed_counts = (
+        default_decay_chain_counts if decay_chain_counts is None else decay_chain_counts
+    )
+    default_events = [
+        {
+            "accepted_event_index": 0,
+            "score": 42.0,
+            "selected_particle_indices": [6],
+            "particles": [
+                {
+                    "index": 1,
+                    "id": 2,
+                    "status": -21,
+                    "mother1": 0,
+                    "mother2": 0,
+                    "daughter1": 5,
+                    "daughter2": 5,
+                    "pt": 0.0,
+                    "energy": 4000.0,
+                    "eta": 0.0,
+                    "charge": 0.6666667,
+                    "is_final": False,
+                },
+                {
+                    "index": 2,
+                    "id": -2,
+                    "status": -21,
+                    "mother1": 0,
+                    "mother2": 0,
+                    "daughter1": 5,
+                    "daughter2": 5,
+                    "pt": 0.0,
+                    "energy": 4000.0,
+                    "eta": 0.0,
+                    "charge": -0.6666667,
+                    "is_final": False,
+                },
+                {
+                    "index": 5,
+                    "id": 23,
+                    "status": -23,
+                    "mother1": 1,
+                    "mother2": 2,
+                    "daughter1": 6,
+                    "daughter2": 7,
+                    "pt": 12.0,
+                    "energy": 90.0,
+                    "eta": 0.1,
+                    "charge": 0.0,
+                    "is_final": False,
+                },
+                {
+                    "index": 6,
+                    "id": 13,
+                    "status": 1,
+                    "mother1": 5,
+                    "mother2": 5,
+                    "daughter1": 0,
+                    "daughter2": 0,
+                    "pt": 42.0,
+                    "energy": 43.0,
+                    "eta": 0.2,
+                    "charge": -1.0,
+                    "is_final": True,
+                },
+                {
+                    "index": 7,
+                    "id": -13,
+                    "status": 1,
+                    "mother1": 5,
+                    "mother2": 5,
+                    "daughter1": 0,
+                    "daughter2": 0,
+                    "pt": 38.0,
+                    "energy": 39.0,
+                    "eta": -0.2,
+                    "charge": 1.0,
+                    "is_final": True,
+                },
+            ],
+        }
+    ]
     summary = {
-        "version": 1,
+        "version": 1 if legacy_format else 2,
         "requested_event_count": 10,
         "accepted_event_count": 8,
         "failed_event_count": 2,
@@ -138,99 +224,31 @@ def _write_event_record_bundle(
         "final_state_pdg_counts": {"13": 4, "-13": 4},
         "status_code_counts": {"-23": 1, "-21": 2, "1": 2},
         "final_state_multiplicity_counts": {"2": 4},
-        "decay_chain_counts": (
-            {"23>13": 4, "23>-13": 4}
-            if decay_chain_counts is None
-            else decay_chain_counts
-        ),
+        "decay_chain_counts": collapsed_counts,
     }
+    if not legacy_format:
+        summary["decay_chain_counts_complete"] = True
+        summary["collapsed_decay_chain_counts"] = collapsed_counts
+        summary["exact_decay_chain_counts"] = (
+            collapsed_counts if exact_decay_chain_counts is None else exact_decay_chain_counts
+        )
     examples = {
-        "version": 1,
-        "stored_event_count": 1,
-        "events": [
-            {
-                "accepted_event_index": 0,
-                "score": 42.0,
-                "selected_particle_indices": [6],
-                "particles": [
-                    {
-                        "index": 1,
-                        "id": 2,
-                        "status": -21,
-                        "mother1": 0,
-                        "mother2": 0,
-                        "daughter1": 5,
-                        "daughter2": 5,
-                        "pt": 0.0,
-                        "energy": 4000.0,
-                        "eta": 0.0,
-                        "charge": 0.6666667,
-                        "is_final": False,
-                    },
-                    {
-                        "index": 2,
-                        "id": -2,
-                        "status": -21,
-                        "mother1": 0,
-                        "mother2": 0,
-                        "daughter1": 5,
-                        "daughter2": 5,
-                        "pt": 0.0,
-                        "energy": 4000.0,
-                        "eta": 0.0,
-                        "charge": -0.6666667,
-                        "is_final": False,
-                    },
-                    {
-                        "index": 5,
-                        "id": 23,
-                        "status": -23,
-                        "mother1": 1,
-                        "mother2": 2,
-                        "daughter1": 6,
-                        "daughter2": 7,
-                        "pt": 12.0,
-                        "energy": 90.0,
-                        "eta": 0.1,
-                        "charge": 0.0,
-                        "is_final": False,
-                    },
-                    {
-                        "index": 6,
-                        "id": 13,
-                        "status": 1,
-                        "mother1": 5,
-                        "mother2": 5,
-                        "daughter1": 0,
-                        "daughter2": 0,
-                        "pt": 42.0,
-                        "energy": 43.0,
-                        "eta": 0.2,
-                        "charge": -1.0,
-                        "is_final": True,
-                    },
-                    {
-                        "index": 7,
-                        "id": -13,
-                        "status": 1,
-                        "mother1": 5,
-                        "mother2": 5,
-                        "daughter1": 0,
-                        "daughter2": 0,
-                        "pt": 38.0,
-                        "energy": 39.0,
-                        "eta": -0.2,
-                        "charge": 1.0,
-                        "is_final": True,
-                    },
-                ],
-            }
-        ],
+        "version": 1 if legacy_format else 2,
+        "stored_event_count": 1 if events is None else len(events),
+        "events": default_events if events is None else events,
     }
+    if not legacy_format:
+        examples["sampling_strategy"] = "reservoir_full_events"
     metadata = {
         "run_id": run_id,
         "root_alias": "local",
         "bootstrap_performed": False,
+        "request": {
+            "commands": ["WeakSingleBoson:ffbar2gmZ = on"],
+            "cmnd_text": "23:onMode = off\n23:onIfAny = 13\n",
+            "event_count": 10,
+            "example_event_limit": 1,
+        },
         "compile": {"ok": True, "exit_code": 0, "stdout": "", "stderr": ""},
         "run": {"ok": True, "exit_code": 0, "stdout": "", "stderr": "", "timed_out": False},
         "created_at_epoch_sec": 1,
@@ -589,6 +607,8 @@ def test_bootstrap_pythia_skips_autodetect_on_first_install(
 ) -> None:
     plugin_root = tmp_path / "plugin"
     plugin_root.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
     state_root = tmp_path / "state"
     runner = core.PythiaSimulationRunner(
         plugin_root=plugin_root,
@@ -596,6 +616,7 @@ def test_bootstrap_pythia_skips_autodetect_on_first_install(
         state_root=state_root,
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setattr(core.Path, "home", lambda: home)
     monkeypatch.setattr(
         core,
         "autodetect_pythia_root",
@@ -973,6 +994,9 @@ def test_find_decay_chain_reuses_summary_and_examples(tmp_path: Path) -> None:
 
     assert payload["analysis_ok"] is True
     assert payload["decay_chain"]["chain_key"] == "23>13"
+    assert payload["decay_chain"]["match_semantics"] == "collapse_same_id_hops"
+    assert payload["decay_chain"]["summary_histogram_complete"] is True
+    assert payload["decay_chain"]["summary_count_source"] == "collapsed_histogram"
     assert payload["decay_chain"]["summary_match_count"] == 4
     assert payload["decay_chain"]["example_snapshot_match_count"] == 1
     assert payload["decay_chain"]["example_snapshot_match_event_count"] == 1
@@ -999,10 +1023,438 @@ def test_find_decay_chain_reports_snapshot_mismatch_without_ambiguous_match_coun
     )
 
     assert payload["analysis_ok"] is True
+    assert payload["decay_chain"]["summary_count_source"] == "collapsed_histogram"
     assert payload["decay_chain"]["summary_match_count"] == 0
     assert payload["decay_chain"]["example_snapshot_match_count"] == 1
     assert payload["decay_chain"]["representative_matches"]
     assert "match_count" not in payload["decay_chain"]
+
+
+def test_find_decay_chain_collapses_identity_preserving_hops(tmp_path: Path) -> None:
+    runner = _make_runner(tmp_path)
+    _write_event_record_bundle(
+        runner.plugin_root,
+        run_id="higgs123",
+        decay_chain_counts={"25>22": 2, "25>25": 1, "25>25>22": 1},
+        exact_decay_chain_counts={"25>22": 1, "25>25": 1, "25>25>22": 1},
+        events=[
+            {
+                "accepted_event_index": 0,
+                "score": 99.0,
+                "selected_particle_indices": [20],
+                "particles": [
+                    {
+                        "index": 1,
+                        "id": 21,
+                        "status": -21,
+                        "mother1": 0,
+                        "mother2": 0,
+                        "daughter1": 5,
+                        "daughter2": 5,
+                        "pt": 0.0,
+                        "energy": 6500.0,
+                        "eta": 0.0,
+                        "charge": 0.0,
+                        "is_final": False,
+                    },
+                    {
+                        "index": 2,
+                        "id": 21,
+                        "status": -21,
+                        "mother1": 0,
+                        "mother2": 0,
+                        "daughter1": 5,
+                        "daughter2": 5,
+                        "pt": 0.0,
+                        "energy": 6500.0,
+                        "eta": 0.0,
+                        "charge": 0.0,
+                        "is_final": False,
+                    },
+                    {
+                        "index": 5,
+                        "id": 25,
+                        "status": -22,
+                        "mother1": 1,
+                        "mother2": 2,
+                        "daughter1": 6,
+                        "daughter2": 6,
+                        "pt": 20.0,
+                        "energy": 125.0,
+                        "eta": 0.1,
+                        "charge": 0.0,
+                        "is_final": False,
+                    },
+                    {
+                        "index": 6,
+                        "id": 25,
+                        "status": -22,
+                        "mother1": 5,
+                        "mother2": 5,
+                        "daughter1": 7,
+                        "daughter2": 7,
+                        "pt": 18.0,
+                        "energy": 124.0,
+                        "eta": 0.1,
+                        "charge": 0.0,
+                        "is_final": False,
+                    },
+                    {
+                        "index": 7,
+                        "id": 22,
+                        "status": 1,
+                        "mother1": 6,
+                        "mother2": 6,
+                        "daughter1": 0,
+                        "daughter2": 0,
+                        "pt": 14.0,
+                        "energy": 62.0,
+                        "eta": 0.2,
+                        "charge": 0.0,
+                        "is_final": True,
+                    },
+                    {
+                        "index": 20,
+                        "id": 11,
+                        "status": 1,
+                        "mother1": 5,
+                        "mother2": 5,
+                        "daughter1": 0,
+                        "daughter2": 0,
+                        "pt": 99.0,
+                        "energy": 100.0,
+                        "eta": -0.3,
+                        "charge": -1.0,
+                        "is_final": True,
+                    },
+                ],
+            }
+        ],
+    )
+
+    payload = runner.find_decay_chain(
+        {
+            "run_id": "higgs123",
+            "decay_chain": {"parent_pdg_id": 25, "child_pdg_id": 22},
+        }
+    )
+
+    assert payload["analysis_ok"] is True
+    assert payload["decay_chain"]["match_semantics"] == "collapse_same_id_hops"
+    assert payload["decay_chain"]["summary_match_count"] == 2
+    assert payload["decay_chain"]["example_snapshot_match_count"] == 2
+    sequences = payload["decay_chain"]["representative_matches"][0]["matches"]
+    assert [[node["id"] for node in sequence] for sequence in sequences] == [[25, 25, 22], [25, 22]]
+
+
+def test_find_decay_chain_keeps_explicit_duplicate_queries_meaningful(tmp_path: Path) -> None:
+    runner = _make_runner(tmp_path)
+    _write_event_record_bundle(
+        runner.plugin_root,
+        run_id="higgs123",
+        decay_chain_counts={"25>22": 2, "25>25": 1, "25>25>22": 1},
+        exact_decay_chain_counts={"25>22": 1, "25>25": 1, "25>25>22": 1},
+        events=[
+            {
+                "accepted_event_index": 0,
+                "score": 99.0,
+                "selected_particle_indices": [20],
+                "particles": [
+                    {
+                        "index": 5,
+                        "id": 25,
+                        "status": -22,
+                        "mother1": 1,
+                        "mother2": 2,
+                        "daughter1": 6,
+                        "daughter2": 6,
+                        "pt": 20.0,
+                        "energy": 125.0,
+                        "eta": 0.1,
+                        "charge": 0.0,
+                        "is_final": False,
+                    },
+                    {
+                        "index": 6,
+                        "id": 25,
+                        "status": -22,
+                        "mother1": 5,
+                        "mother2": 5,
+                        "daughter1": 7,
+                        "daughter2": 7,
+                        "pt": 18.0,
+                        "energy": 124.0,
+                        "eta": 0.1,
+                        "charge": 0.0,
+                        "is_final": False,
+                    },
+                    {
+                        "index": 7,
+                        "id": 22,
+                        "status": 1,
+                        "mother1": 6,
+                        "mother2": 6,
+                        "daughter1": 0,
+                        "daughter2": 0,
+                        "pt": 14.0,
+                        "energy": 62.0,
+                        "eta": 0.2,
+                        "charge": 0.0,
+                        "is_final": True,
+                    },
+                ],
+            }
+        ],
+    )
+
+    payload = runner.find_decay_chain(
+        {
+            "run_id": "higgs123",
+            "decay_chain": {"parent_pdg_id": 25, "child_pdg_id": 25},
+        }
+    )
+
+    assert payload["analysis_ok"] is True
+    assert payload["decay_chain"]["summary_match_count"] == 1
+    assert payload["decay_chain"]["example_snapshot_match_count"] == 1
+    assert payload["decay_chain"]["match_count"] == 1
+
+
+def test_find_decay_chain_uses_complete_histogram_without_pruning(tmp_path: Path) -> None:
+    runner = _make_runner(tmp_path)
+    histogram = {f"{1000 + index}>{2000 + index}": 1 for index in range(300)}
+    query_parent = 1299
+    query_child = 2299
+    _write_event_record_bundle(
+        runner.plugin_root,
+        run_id="hist123",
+        decay_chain_counts=histogram,
+        exact_decay_chain_counts=histogram,
+    )
+
+    payload = runner.find_decay_chain(
+        {
+            "run_id": "hist123",
+            "decay_chain": {"parent_pdg_id": query_parent, "child_pdg_id": query_child},
+        }
+    )
+
+    assert payload["analysis_ok"] is True
+    assert payload["decay_chain"]["summary_histogram_complete"] is True
+    assert payload["decay_chain"]["summary_match_count"] == 1
+    assert payload["decay_chain"]["summary_count_source"] == "collapsed_histogram"
+
+
+def test_trace_particle_lineage_can_select_non_top_ranked_particle_from_full_event_examples(
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path)
+    _write_event_record_bundle(
+        runner.plugin_root,
+        run_id="lineage123",
+        events=[
+            {
+                "accepted_event_index": 0,
+                "score": 80.0,
+                "selected_particle_indices": [6],
+                "particles": [
+                    {
+                        "index": 1,
+                        "id": 2,
+                        "status": -21,
+                        "mother1": 0,
+                        "mother2": 0,
+                        "daughter1": 5,
+                        "daughter2": 5,
+                        "pt": 0.0,
+                        "energy": 4000.0,
+                        "eta": 0.0,
+                        "charge": 0.6666667,
+                        "is_final": False,
+                    },
+                    {
+                        "index": 2,
+                        "id": -2,
+                        "status": -21,
+                        "mother1": 0,
+                        "mother2": 0,
+                        "daughter1": 5,
+                        "daughter2": 5,
+                        "pt": 0.0,
+                        "energy": 4000.0,
+                        "eta": 0.0,
+                        "charge": -0.6666667,
+                        "is_final": False,
+                    },
+                    {
+                        "index": 5,
+                        "id": 310,
+                        "status": -23,
+                        "mother1": 1,
+                        "mother2": 2,
+                        "daughter1": 8,
+                        "daughter2": 8,
+                        "pt": 3.0,
+                        "energy": 10.0,
+                        "eta": 0.2,
+                        "charge": 0.0,
+                        "is_final": False,
+                    },
+                    {
+                        "index": 6,
+                        "id": 11,
+                        "status": 1,
+                        "mother1": 5,
+                        "mother2": 5,
+                        "daughter1": 0,
+                        "daughter2": 0,
+                        "pt": 80.0,
+                        "energy": 81.0,
+                        "eta": -0.2,
+                        "charge": -1.0,
+                        "is_final": True,
+                    },
+                    {
+                        "index": 8,
+                        "id": 310,
+                        "status": 1,
+                        "mother1": 5,
+                        "mother2": 5,
+                        "daughter1": 0,
+                        "daughter2": 0,
+                        "pt": 1.5,
+                        "energy": 2.0,
+                        "eta": 0.3,
+                        "charge": 0.0,
+                        "is_final": True,
+                    },
+                ],
+            }
+        ],
+    )
+
+    payload = runner.trace_particle_lineage(
+        {
+            "run_id": "lineage123",
+            "particle_selector": {"pdg_id": 310, "rank_by": "pt", "rank": 1},
+            "trace_options": {"direction": "ancestors", "stop_at": "incoming_partons"},
+        }
+    )
+
+    assert payload["analysis_ok"] is True
+    assert payload["selected_particle"]["index"] == 8
+    assert payload["selected_particle"]["id"] == 310
+    assert {node["id"] for node in payload["matched_stop_nodes"]} == {2, -2}
+
+
+def test_find_decay_chain_scans_full_event_examples_outside_selected_neighborhood(
+    tmp_path: Path,
+) -> None:
+    runner = _make_runner(tmp_path)
+    _write_event_record_bundle(
+        runner.plugin_root,
+        run_id="fullscan123",
+        decay_chain_counts={"25>5": 1},
+        exact_decay_chain_counts={"25>5": 1},
+        events=[
+            {
+                "accepted_event_index": 0,
+                "score": 70.0,
+                "selected_particle_indices": [6],
+                "particles": [
+                    {
+                        "index": 5,
+                        "id": 23,
+                        "status": -23,
+                        "mother1": 1,
+                        "mother2": 2,
+                        "daughter1": 6,
+                        "daughter2": 6,
+                        "pt": 30.0,
+                        "energy": 91.0,
+                        "eta": 0.0,
+                        "charge": 0.0,
+                        "is_final": False,
+                    },
+                    {
+                        "index": 6,
+                        "id": 11,
+                        "status": 1,
+                        "mother1": 5,
+                        "mother2": 5,
+                        "daughter1": 0,
+                        "daughter2": 0,
+                        "pt": 70.0,
+                        "energy": 71.0,
+                        "eta": -0.1,
+                        "charge": -1.0,
+                        "is_final": True,
+                    },
+                    {
+                        "index": 9,
+                        "id": 25,
+                        "status": -22,
+                        "mother1": 1,
+                        "mother2": 2,
+                        "daughter1": 10,
+                        "daughter2": 10,
+                        "pt": 12.0,
+                        "energy": 125.0,
+                        "eta": 0.4,
+                        "charge": 0.0,
+                        "is_final": False,
+                    },
+                    {
+                        "index": 10,
+                        "id": 5,
+                        "status": 1,
+                        "mother1": 9,
+                        "mother2": 9,
+                        "daughter1": 0,
+                        "daughter2": 0,
+                        "pt": 5.0,
+                        "energy": 7.0,
+                        "eta": 0.6,
+                        "charge": -0.3333333,
+                        "is_final": True,
+                    },
+                ],
+            }
+        ],
+    )
+
+    payload = runner.find_decay_chain(
+        {
+            "run_id": "fullscan123",
+            "decay_chain": {"parent_pdg_id": 25, "child_pdg_id": 5},
+        }
+    )
+
+    assert payload["analysis_ok"] is True
+    assert payload["decay_chain"]["summary_match_count"] == 1
+    assert payload["decay_chain"]["example_snapshot_match_count"] == 1
+    assert payload["decay_chain"]["representative_matches"]
+
+
+def test_find_decay_chain_legacy_snapshots_keep_legacy_semantics(tmp_path: Path) -> None:
+    runner = _make_runner(tmp_path)
+    _write_event_record_bundle(
+        runner.plugin_root,
+        run_id="legacy123",
+        legacy_format=True,
+    )
+
+    payload = runner.find_decay_chain(
+        {
+            "run_id": "legacy123",
+            "decay_chain": {"parent_pdg_id": 23, "child_pdg_id": 13},
+        }
+    )
+
+    assert payload["analysis_ok"] is True
+    assert payload["decay_chain"]["match_semantics"] == "exact_immediate_legacy"
+    assert payload["decay_chain"]["summary_histogram_complete"] is False
+    assert payload["decay_chain"]["summary_count_source"] == "legacy_decay_chain_counts"
 
 
 def test_explain_status_codes_annotates_observed_counts(tmp_path: Path) -> None:
@@ -1133,6 +1585,9 @@ def test_server_analysis_summaries_include_representative_details(tmp_path: Path
     assert "representative_lineage_paths:" in lineage_summary
     assert "6:13[1] -> 5:23[-23] -> 1:2[-21]" in lineage_summary
     assert "representative_matches_detail:" in decay_summary
+    assert "match_semantics: collapse_same_id_hops" in decay_summary
+    assert "summary_histogram_complete: True" in decay_summary
+    assert "summary_count_source: collapsed_histogram" in decay_summary
     assert "summary_match_count: 4" in decay_summary
     assert "example_snapshot_match_count: 1" in decay_summary
     assert "count_scope_note:" in decay_summary
@@ -1190,8 +1645,10 @@ def test_mcp_config_matches_packaging_entrypoints() -> None:
     assert claude_manifest["mcpServers"] == "./.mcp.json"
     assert "pythia-sim" in gemini_manifest["mcpServers"]
     assert mcp_config["mcpServers"]["pythia-sim"]["command"] == "python3"
-    assert mcp_config["mcpServers"]["pythia-sim"]["args"] == ["./scripts/pythia_sim_server.py"]
-    assert mcp_config["mcpServers"]["pythia-sim"]["cwd"] == "./"
+    assert mcp_config["mcpServers"]["pythia-sim"]["args"] == [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/pythia_sim_server.py"
+    ]
+    assert mcp_config["mcpServers"]["pythia-sim"]["cwd"] == "${CLAUDE_PLUGIN_ROOT}"
 
 
 def test_claude_marketplace_manifest_points_to_repo_root_plugin() -> None:

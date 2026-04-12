@@ -751,6 +751,34 @@ def _build_decay_chain_key(chain_query: DecayChainQuery) -> str:
     )
 
 
+def _decay_chain_query_ids(chain_query: DecayChainQuery) -> list[int]:
+    return [
+        chain_query.parent_pdg_id,
+        *chain_query.intermediate_pdg_ids,
+        chain_query.child_pdg_id,
+    ]
+
+
+def _resolve_decay_chain_histogram(
+    summary: dict[str, Any],
+) -> tuple[dict[str, Any], str, bool, str]:
+    collapsed_counts = summary.get("collapsed_decay_chain_counts")
+    if isinstance(collapsed_counts, dict):
+        return (
+            collapsed_counts,
+            "collapse_same_id_hops",
+            bool(summary.get("decay_chain_counts_complete") is True),
+            "collapsed_histogram",
+        )
+    exact_counts = summary.get("decay_chain_counts")
+    if isinstance(exact_counts, dict):
+        return exact_counts, "exact_immediate_legacy", False, "legacy_decay_chain_counts"
+    exact_counts = summary.get("exact_decay_chain_counts")
+    if isinstance(exact_counts, dict):
+        return exact_counts, "exact_immediate_legacy", False, "exact_histogram"
+    return {}, "exact_immediate_legacy", False, "unavailable"
+
+
 def _artifact_helper_header_source() -> str:
     begin_prefix = json.dumps(TERMINAL_OUTPUT_BEGIN_PREFIX)
     end_prefix = json.dumps(TERMINAL_OUTPUT_END_PREFIX)
@@ -1009,6 +1037,7 @@ def _build_event_record_source(
     source = f"""#include "Pythia8/Pythia.h"
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -1032,8 +1061,6 @@ const char* kSelectorRankBy = {_cxx_string(selector.rank_by)};
 const std::vector<int> kSelectorStatusCodes = {_cxx_int_vector(selector.status_codes)};
 const int kMaxChainDepth = {2 + MAX_CHAIN_INTERMEDIATES};
 const int kMaxSelectedParticlesPerEvent = 8;
-const int kMaxStoredDecayChains = 256;
-
 struct ExampleEntry {{
   double score;
   int acceptedEventIndex;
@@ -1098,25 +1125,6 @@ std::string stringIntMapJson(const std::map<std::string, int>& values) {{
   return out.str();
 }}
 
-std::map<std::string, int> pruneDecayChainCounts(const std::map<std::string, int>& values) {{
-  std::vector<std::pair<std::string, int> > items;
-  for (std::map<std::string, int>::const_iterator it = values.begin(); it != values.end(); ++it) {{
-    items.push_back(*it);
-  }}
-  std::sort(
-      items.begin(),
-      items.end(),
-      [](const std::pair<std::string, int>& left, const std::pair<std::string, int>& right) {{
-        if (left.second != right.second) return left.second > right.second;
-        return left.first < right.first;
-      }});
-  std::map<std::string, int> pruned;
-  for (std::size_t i = 0; i < items.size() && static_cast<int>(i) < kMaxStoredDecayChains; ++i) {{
-    pruned[items[i].first] = items[i].second;
-  }}
-  return pruned;
-}}
-
 std::string selectedIndexListJson(const std::vector<int>& values) {{
   std::ostringstream out;
   out << "[";
@@ -1126,63 +1134,6 @@ std::string selectedIndexListJson(const std::vector<int>& values) {{
   }}
   out << "]";
   return out.str();
-}}
-
-void pushUnique(std::vector<int>& values, const int candidate) {{
-  if (candidate <= 0) return;
-  for (std::size_t i = 0; i < values.size(); ++i) {{
-    if (values[i] == candidate) return;
-  }}
-  values.push_back(candidate);
-}}
-
-void collectNeighborhood(
-    const Event& event, const int index, std::vector<int>& retained, const int depth) {{
-  if (depth < 0 || index <= 0 || index >= event.size()) return;
-  bool alreadyPresent = false;
-  for (std::size_t i = 0; i < retained.size(); ++i) {{
-    if (retained[i] == index) {{
-      alreadyPresent = true;
-      break;
-    }}
-  }}
-  if (!alreadyPresent) retained.push_back(index);
-  if (depth == 0) return;
-  const Particle& particle = event[index];
-  if (particle.mother1() > 0) collectNeighborhood(event, particle.mother1(), retained, depth - 1);
-  if (particle.mother2() > 0 && particle.mother2() != particle.mother1()) {{
-    collectNeighborhood(event, particle.mother2(), retained, depth - 1);
-  }}
-  const int firstDaughter = particle.daughter1();
-  const int lastDaughter = particle.daughter2();
-  if (firstDaughter > 0 && lastDaughter >= firstDaughter) {{
-    for (int child = firstDaughter; child <= lastDaughter && child < event.size(); ++child) {{
-      collectNeighborhood(event, child, retained, depth - 1);
-    }}
-  }}
-}}
-
-std::vector<int> retainedIndices(const Event& event, const std::vector<int>& selectedIndices) {{
-  std::vector<int> seeds = selectedIndices;
-  if (seeds.empty()) {{
-    std::vector<std::pair<double, int> > fallback;
-    for (int i = 0; i < event.size(); ++i) {{
-      if (!event[i].isFinal()) continue;
-      fallback.push_back(std::make_pair(event[i].pT(), i));
-    }}
-    std::sort(fallback.begin(), fallback.end(), std::greater<std::pair<double, int> >());
-    for (std::size_t i = 0; i < fallback.size() && i < 4; ++i) pushUnique(seeds, fallback[i].second);
-  }}
-  std::vector<int> retained;
-  for (std::size_t i = 0; i < seeds.size() && i < 4; ++i) {{
-    collectNeighborhood(event, seeds[i], retained, 3);
-  }}
-  if (retained.empty()) {{
-    pushUnique(retained, 1);
-    pushUnique(retained, 2);
-  }}
-  std::sort(retained.begin(), retained.end());
-  return retained;
 }}
 
 double rankValue(const Particle& particle) {{
@@ -1247,16 +1198,17 @@ std::string eventJson(
     const int acceptedEventIndex,
     const double score,
     const std::vector<int>& selectedIndices) {{
-  const std::vector<int> retained = retainedIndices(event, selectedIndices);
   std::ostringstream out;
   out << "{{"
       << "\\"accepted_event_index\\":" << acceptedEventIndex << ","
       << "\\"score\\":" << score << ","
       << "\\"selected_particle_indices\\":" << selectedIndexListJson(selectedIndices) << ","
       << "\\"particles\\":[";
-  for (std::size_t i = 0; i < retained.size(); ++i) {{
-    if (i) out << ",";
-    out << particleJson(event[retained[i]], retained[i]);
+  bool first = true;
+  for (int i = 1; i < event.size(); ++i) {{
+    if (!first) out << ",";
+    first = false;
+    out << particleJson(event[i], i);
   }}
   out << "]}}";
   return out.str();
@@ -1275,7 +1227,8 @@ void collectChainCounts(
     const Event& event,
     const int index,
     std::vector<int>& chain,
-    std::map<std::string, int>& counts,
+    std::map<std::string, int>& exactCounts,
+    std::map<std::string, int>& collapsedCounts,
     const int depth) {{
   if (depth >= kMaxChainDepth) return;
   const Particle& particle = event[index];
@@ -1284,13 +1237,43 @@ void collectChainCounts(
   if (firstDaughter <= 0 || lastDaughter < firstDaughter) return;
   for (int child = firstDaughter; child <= lastDaughter && child < event.size(); ++child) {{
     chain.push_back(event[child].id());
-    if (chain.size() >= 2u) counts[chainKey(chain)] += 1;
-    collectChainCounts(event, child, chain, counts, depth + 1);
+    if (chain.size() >= 2u) {{
+      exactCounts[chainKey(chain)] += 1;
+      std::vector<int> runIds;
+      std::vector<int> runLengths;
+      for (std::size_t i = 0; i < chain.size(); ++i) {{
+        if (runIds.empty() || runIds.back() != chain[i]) {{
+          runIds.push_back(chain[i]);
+          runLengths.push_back(1);
+        }} else {{
+          runLengths.back() += 1;
+        }}
+      }}
+      std::vector<int> collapsed;
+      std::function<void(std::size_t)> addCollapsedVariants =
+          [&](const std::size_t runIndex) {{
+            if (runIndex >= runIds.size()) {{
+              if (collapsed.size() >= 2u) {{
+                collapsedCounts[chainKey(collapsed)] += 1;
+              }}
+              return;
+            }}
+            const int id = runIds[runIndex];
+            const int length = runLengths[runIndex];
+            for (int repeat = 1; repeat <= length; ++repeat) {{
+              for (int i = 0; i < repeat; ++i) collapsed.push_back(id);
+              addCollapsedVariants(runIndex + 1);
+              for (int i = 0; i < repeat; ++i) collapsed.pop_back();
+            }}
+          }};
+      addCollapsedVariants(0);
+    }}
+    collectChainCounts(event, child, chain, exactCounts, collapsedCounts, depth + 1);
     chain.pop_back();
   }}
 }}
 
-void addExample(std::vector<ExampleEntry>& examples, const ExampleEntry& candidate) {{
+void addTopScoreExample(std::vector<ExampleEntry>& examples, const ExampleEntry& candidate) {{
   if (candidate.score < 0.0) return;
   if (static_cast<int>(examples.size()) < kExampleEventLimit) {{
     examples.push_back(candidate);
@@ -1301,6 +1284,20 @@ void addExample(std::vector<ExampleEntry>& examples, const ExampleEntry& candida
     if (examples[i].score < examples[minIndex].score) minIndex = i;
   }}
   if (candidate.score > examples[minIndex].score) examples[minIndex] = candidate;
+}}
+
+void addReservoirExample(
+    std::vector<ExampleEntry>& examples,
+    const ExampleEntry& candidate,
+    const int acceptedEventCount,
+    Rndm& randomGenerator) {{
+  if (static_cast<int>(examples.size()) < kExampleEventLimit) {{
+    examples.push_back(candidate);
+    return;
+  }}
+  if (acceptedEventCount <= 0) return;
+  const int draw = static_cast<int>(randomGenerator.flat() * acceptedEventCount);
+  if (draw < kExampleEventLimit) examples[draw] = candidate;
 }}
 
 bool writeTextFile(const std::string& path, const std::string& text) {{
@@ -1328,7 +1325,8 @@ int main() {{
   std::map<int, int> finalStatePdgCounts;
   std::map<int, int> statusCodeCounts;
   std::map<int, int> finalStateMultiplicityCounts;
-  std::map<std::string, int> decayChainCounts;
+  std::map<std::string, int> exactDecayChainCounts;
+  std::map<std::string, int> collapsedDecayChainCounts;
   std::vector<ExampleEntry> examples;
   int acceptedEvents = 0;
   int failedEvents = 0;
@@ -1356,7 +1354,7 @@ int main() {{
         rankedSelectedParticles.push_back(std::make_pair(score, i));
       }}
       std::vector<int> chain(1, particle.id());
-      collectChainCounts(pythia.event, i, chain, decayChainCounts, 0);
+      collectChainCounts(pythia.event, i, chain, exactDecayChainCounts, collapsedDecayChainCounts, 0);
     }}
     finalStateMultiplicityCounts[finalMultiplicity] += 1;
     std::sort(
@@ -1368,21 +1366,34 @@ int main() {{
       selectedIndices.push_back(rankedSelectedParticles[i].second);
     }}
     const double exampleScore = bestSelectorScore >= 0.0 ? bestSelectorScore : eventFallbackScore(pythia.event);
-    addExample(examples, ExampleEntry{{exampleScore, acceptedEvents - 1, eventJson(pythia.event, acceptedEvents - 1, exampleScore, selectedIndices)}});
+    const ExampleEntry exampleEntry{{exampleScore, acceptedEvents - 1, eventJson(pythia.event, acceptedEvents - 1, exampleScore, selectedIndices)}};
+    if (kSelectorEnabled) {{
+      addTopScoreExample(examples, exampleEntry);
+    }} else {{
+      addReservoirExample(examples, exampleEntry, acceptedEvents, pythia.rndm);
+    }}
   }}
 
-  std::sort(
-      examples.begin(),
-      examples.end(),
-      [](const ExampleEntry& left, const ExampleEntry& right) {{
-        if (left.score != right.score) return left.score > right.score;
-        return left.acceptedEventIndex < right.acceptedEventIndex;
-      }});
-  const std::map<std::string, int> prunedDecayChainCounts = pruneDecayChainCounts(decayChainCounts);
+  if (kSelectorEnabled) {{
+    std::sort(
+        examples.begin(),
+        examples.end(),
+        [](const ExampleEntry& left, const ExampleEntry& right) {{
+          if (left.score != right.score) return left.score > right.score;
+          return left.acceptedEventIndex < right.acceptedEventIndex;
+        }});
+  }} else {{
+    std::sort(
+        examples.begin(),
+        examples.end(),
+        [](const ExampleEntry& left, const ExampleEntry& right) {{
+          return left.acceptedEventIndex < right.acceptedEventIndex;
+        }});
+  }}
 
   std::ostringstream summary;
   summary << "{{"
-          << "\\"version\\":1,"
+          << "\\"version\\":2,"
           << "\\"selector_enabled\\":" << boolJson(kSelectorEnabled) << ","
           << "\\"requested_event_count\\":" << kRequestedEventCount << ","
           << "\\"accepted_event_count\\":" << acceptedEvents << ","
@@ -1391,14 +1402,18 @@ int main() {{
           << "\\"final_state_pdg_counts\\":" << intMapJson(finalStatePdgCounts) << ","
           << "\\"status_code_counts\\":" << intMapJson(statusCodeCounts) << ","
           << "\\"final_state_multiplicity_counts\\":" << intMapJson(finalStateMultiplicityCounts) << ","
-          << "\\"decay_chain_counts\\":" << stringIntMapJson(prunedDecayChainCounts)
+          << "\\"decay_chain_counts_complete\\":true,"
+          << "\\"exact_decay_chain_counts\\":" << stringIntMapJson(exactDecayChainCounts) << ","
+          << "\\"collapsed_decay_chain_counts\\":" << stringIntMapJson(collapsedDecayChainCounts) << ","
+          << "\\"decay_chain_counts\\":" << stringIntMapJson(collapsedDecayChainCounts)
           << "}}";
   if (!writeTextFile("{EVENT_RECORD_SUMMARY_ARTIFACT}", summary.str())) return 1;
 
   std::ostringstream examplePayload;
   examplePayload << "{{"
-                 << "\\"version\\":1,"
+                 << "\\"version\\":2,"
                  << "\\"selector_rank_by\\":" << quoteJson(kSelectorRankBy) << ","
+                 << "\\"sampling_strategy\\":" << quoteJson(kSelectorEnabled ? "selector_top_score_full_events" : "reservoir_full_events") << ","
                  << "\\"stored_event_count\\":" << examples.size() << ","
                  << "\\"events\\":[";
   for (std::size_t i = 0; i < examples.size(); ++i) {{
@@ -1927,6 +1942,7 @@ def _base_payload_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
 def _event_record_summary_payload(bundle: dict[str, Any]) -> dict[str, Any]:
     summary = bundle["summary"]
     examples = bundle["examples"]
+    decay_chain_counts, _, _, _ = _resolve_decay_chain_histogram(summary)
     payload = _base_payload_from_bundle(bundle)
     payload["event_record"] = {
         "requested_event_count": summary.get("requested_event_count"),
@@ -1936,7 +1952,7 @@ def _event_record_summary_payload(bundle: dict[str, Any]) -> dict[str, Any]:
         "top_particle_pdg_counts": _top_counts(summary.get("particle_pdg_counts")),
         "top_final_state_pdg_counts": _top_counts(summary.get("final_state_pdg_counts")),
         "top_status_code_counts": _top_counts(summary.get("status_code_counts")),
-        "top_decay_chain_counts": _top_counts(summary.get("decay_chain_counts")),
+        "top_decay_chain_counts": _top_counts(decay_chain_counts),
     }
     return payload
 
@@ -2401,13 +2417,12 @@ def _select_particle_from_examples(
 
 
 def _chain_match_sequences(
-    event: dict[str, Any], chain_query: DecayChainQuery
+    event: dict[str, Any],
+    chain_query: DecayChainQuery,
+    *,
+    collapse_same_id_hops: bool,
 ) -> list[list[dict[str, Any]]]:
-    target_ids = [
-        chain_query.parent_pdg_id,
-        *chain_query.intermediate_pdg_ids,
-        chain_query.child_pdg_id,
-    ]
+    target_ids = _decay_chain_query_ids(chain_query)
     matches: list[list[dict[str, Any]]] = []
 
     def descend(current: dict[str, Any], target_offset: int, path: list[dict[str, Any]]) -> None:
@@ -2415,11 +2430,18 @@ def _chain_match_sequences(
         if target_offset == len(target_ids) - 1:
             matches.append(path)
             return
+        current_id = int(current.get("id", 0))
+        next_target = target_ids[target_offset + 1]
         for child_index in _neighbor_indices(current, direction=TRACE_DIRECTION_DESCENDANTS):
             child = _particle_by_index(event, child_index)
-            if child is None or int(child.get("id", 0)) != target_ids[target_offset + 1]:
+            if child is None:
                 continue
-            descend(child, target_offset + 1, path)
+            child_id = int(child.get("id", 0))
+            if child_id == next_target:
+                descend(child, target_offset + 1, path)
+                continue
+            if collapse_same_id_hops and next_target != current_id and child_id == current_id:
+                descend(child, target_offset, path)
 
     particles = event.get("particles")
     if not isinstance(particles, list):
@@ -2434,7 +2456,10 @@ def _chain_match_sequences(
 
 
 def _scan_decay_chain_example_matches(
-    examples: dict[str, Any], chain_query: DecayChainQuery
+    examples: dict[str, Any],
+    chain_query: DecayChainQuery,
+    *,
+    collapse_same_id_hops: bool,
 ) -> tuple[int, int, list[dict[str, Any]]]:
     total_match_count = 0
     matched_event_count = 0
@@ -2447,7 +2472,11 @@ def _scan_decay_chain_example_matches(
     for event in events:
         if not isinstance(event, dict):
             continue
-        matches = _chain_match_sequences(event, chain_query)
+        matches = _chain_match_sequences(
+            event,
+            chain_query,
+            collapse_same_id_hops=collapse_same_id_hops,
+        )
         if not matches:
             continue
         matched_event_count += 1
@@ -3112,7 +3141,9 @@ class PythiaSimulationRunner:
         summary = bundle["summary"]
         examples = bundle["examples"]
         chain_key = _build_decay_chain_key(chain_query)
-        decay_chain_counts = summary.get("decay_chain_counts", {})
+        decay_chain_counts, match_semantics, summary_histogram_complete, summary_count_source = (
+            _resolve_decay_chain_histogram(summary)
+        )
         summary_match_count = 0
         if isinstance(decay_chain_counts, dict):
             try:
@@ -3123,11 +3154,18 @@ class PythiaSimulationRunner:
             example_snapshot_match_count,
             example_snapshot_match_event_count,
             representative_matches,
-        ) = _scan_decay_chain_example_matches(examples, chain_query)
+        ) = _scan_decay_chain_example_matches(
+            examples,
+            chain_query,
+            collapse_same_id_hops=match_semantics == "collapse_same_id_hops",
+        )
         payload["analysis_ok"] = True
         decay_chain_payload = {
             "query": dataclasses.asdict(chain_query),
             "chain_key": chain_key,
+            "match_semantics": match_semantics,
+            "summary_histogram_complete": summary_histogram_complete,
+            "summary_count_source": summary_count_source,
             "summary_match_count": summary_match_count,
             "example_snapshot_match_count": example_snapshot_match_count,
             "example_snapshot_match_event_count": example_snapshot_match_event_count,
