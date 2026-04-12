@@ -23,12 +23,13 @@ Do not use it when the task needs:
 
 ## Workflow
 
-1. Call `list_pythia_roots` if you need to confirm which checkout is ready; this may surface an auto-detected local install even when no registry was configured.
-2. Call `search_pythia_examples` on demand if example `.cc` or `.cmnd` context would help code generation or debugging.
-3. Call `run_pythia_simulation` with raw standalone C++ source.
-4. Pass `.cmnd` or other text companion files only through `supporting_files`.
-5. Expect text-only output. Histograms and helper output are rendered as terminal blocks, not artifact files or images.
-6. Use `summarize_event_record`, `trace_particle_lineage`, `find_decay_chain`, and `explain_status_codes` when the user needs structured follow-up analysis.
+1. On a clean machine or first-use install, call `bootstrap_pythia` directly so the plugin can install and persist its managed standalone Pythia root without wasting time probing the host for one.
+2. Call `list_pythia_roots` if you need to confirm which checkout is ready after that; it may also surface an auto-detected local install when the user already has one configured.
+3. Call `search_pythia_examples` on demand if example `.cc` or `.cmnd` context would help code generation or debugging.
+4. Call `run_pythia_simulation` with raw standalone C++ source.
+5. Pass `.cmnd` or other text companion files only through `supporting_files`.
+6. Expect text-only output. Histograms and helper output are rendered as terminal blocks, not artifact files or images.
+7. Use `summarize_event_record`, `trace_particle_lineage`, `find_decay_chain`, and `explain_status_codes` when the user needs structured follow-up analysis.
 
 ## Guardrails
 

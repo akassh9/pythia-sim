@@ -1700,6 +1700,34 @@ def _candidate_registry_paths(
     return unique_candidates
 
 
+def _has_prior_root_configuration(
+    registry_path: Path | None,
+    *,
+    plugin_root: Path,
+    env: Mapping[str, str],
+    platform: str,
+) -> bool:
+    if registry_path is not None:
+        return True
+
+    explicit_registry_path = env.get(PYTHIA_SIM_REGISTRY_PATH_ENV)
+    if isinstance(explicit_registry_path, str) and explicit_registry_path.strip():
+        return True
+
+    explicit_root = env.get(PYTHIA_SIM_ROOT_ENV)
+    if isinstance(explicit_root, str) and explicit_root.strip():
+        return True
+
+    return any(
+        candidate.is_file()
+        for candidate in _candidate_registry_paths(
+            plugin_root=plugin_root,
+            env=env,
+            platform=platform,
+        )
+    )
+
+
 def load_registry(
     registry_path: Path | None = None,
     *,
@@ -2624,7 +2652,20 @@ class PythiaSimulationRunner:
         pythia_dir = vendor_dir / PYTHIA_AUTO_ALIAS
 
         logs = []
-        detected = autodetect_pythia_root(env)
+        platform_name = _current_platform()
+        should_search_existing_install = _has_prior_root_configuration(
+            self.registry_path,
+            plugin_root=self.plugin_root,
+            env=env,
+            platform=platform_name,
+        )
+        detected = None
+        if should_search_existing_install:
+            detected = autodetect_pythia_root(env)
+        else:
+            logs.append(
+                "No prior Pythia configuration found; skipping local discovery and bootstrapping the managed install."
+            )
         selected_alias = PYTHIA_AUTO_ALIAS
         selected_root = pythia_dir
 
@@ -2760,7 +2801,7 @@ class PythiaSimulationRunner:
                 logs.append("Compilation successful.")
 
         registry_file = _candidate_registry_paths(
-            plugin_root=self.plugin_root, env=env, platform=_current_platform()
+            plugin_root=self.plugin_root, env=env, platform=platform_name
         )[0]
         registry_file.parent.mkdir(parents=True, exist_ok=True)
 

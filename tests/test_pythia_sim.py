@@ -584,7 +584,60 @@ def test_search_examples_supports_installed_prefix_layout(tmp_path: Path) -> Non
     assert payload["examples_path"] == str(share_examples)
 
 
-def test_bootstrap_pythia_prefers_detected_install_over_download(
+def test_bootstrap_pythia_skips_autodetect_on_first_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    state_root = tmp_path / "state"
+    runner = core.PythiaSimulationRunner(
+        plugin_root=plugin_root,
+        registry_path=None,
+        state_root=state_root,
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setattr(
+        core,
+        "autodetect_pythia_root",
+        lambda env=None: (_ for _ in ()).throw(
+            AssertionError("first managed bootstrap should not autodetect local installs")
+        ),
+    )
+
+    def fake_download(url: str, destination: Path) -> None:
+        Path(destination).write_text("stub tarball\n", encoding="utf-8")
+
+    class FakeTarball:
+        def __enter__(self) -> "FakeTarball":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            return False
+
+        def extractall(self, path: Path) -> None:
+            _make_fake_root(path, name=core.PYTHIA_AUTO_ALIAS)
+
+    monkeypatch.setattr(core.urllib.request, "urlretrieve", fake_download)
+    monkeypatch.setattr(
+        core,
+        "_run_configure_and_make",
+        lambda **kwargs: core.CommandExecution(
+            ["configure"], 0, "configured\n", ""
+        ),
+    )
+    monkeypatch.setattr(core.tarfile, "open", lambda *args, **kwargs: FakeTarball())
+    payload = runner.bootstrap_pythia({})
+
+    managed_root = (state_root / "vendor" / core.PYTHIA_AUTO_ALIAS).resolve()
+    assert payload["alias"] == core.PYTHIA_AUTO_ALIAS
+    assert payload["path"] == str(managed_root)
+    assert "skipping local discovery" in payload["logs"]
+    registry = core.load_registry(Path(payload["registry_path"]))
+    assert registry.default_alias == core.PYTHIA_AUTO_ALIAS
+    assert registry.roots[core.PYTHIA_AUTO_ALIAS].path == managed_root
+
+
+def test_bootstrap_pythia_prefers_detected_install_when_root_is_already_configured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _make_fake_root(tmp_path, name="pythia8317")
@@ -597,6 +650,7 @@ def test_bootstrap_pythia_prefers_detected_install_over_download(
         state_root=tmp_path / "state",
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setenv(core.PYTHIA_SIM_ROOT_ENV, str(root))
 
     monkeypatch.setattr(
         core,

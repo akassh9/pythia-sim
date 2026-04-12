@@ -86,7 +86,7 @@ The server exposes the following MCP tools.
 | Tool | Purpose |
 | --- | --- |
 | `list_pythia_roots` | List configured or auto-detected roots, compiler availability, build status, and whether standalone execution is possible. |
-| `bootstrap_pythia` | Download, configure, build, and register a supported standalone Pythia installation for the local user. |
+| `bootstrap_pythia` | Download, configure, build, and register a managed standalone Pythia installation for the local user. On a clean machine it skips host discovery and installs directly into the plugin-managed location. |
 | `search_pythia_examples` | Search the configured `examples/` tree for relevant `.cc` and optional `.cmnd` snippets. |
 | `run_pythia_simulation` | Compile and run raw standalone Pythia C++ in an isolated directory with bounded time and output. |
 | `summarize_event_record` | Run a declarative simulation, store a compact private snapshot, and return a reusable `run_id`. |
@@ -121,7 +121,7 @@ At a high level, the runtime is split into two layers:
 
 Execution flow for a raw simulation:
 
-1. Resolve the target Pythia root from explicit config or auto-detection.
+1. Resolve the target Pythia root from explicit config, the persisted managed install, or auto-detection.
 2. Validate the source against the plugin's standalone-only guardrails.
 3. Create an isolated temporary run directory under the state root.
 4. Compile against the chosen Pythia installation.
@@ -253,6 +253,8 @@ The implementation probes a small set of common sources, including:
 
 If no usable root is found, call `bootstrap_pythia`.
 
+On a clean first-use machine, `bootstrap_pythia` skips the host search and installs directly into the plugin-managed vendor directory, then writes a registry entry so later tool calls can find that install immediately.
+
 ### Multi-root registry
 
 For multi-root or custom-build setups, start from the example file:
@@ -356,7 +358,7 @@ pytest -q
 ### Typical local verification flow
 
 1. Confirm `python3` can launch the server.
-2. Confirm a Pythia root is available through config, auto-detection, or bootstrap.
+2. Confirm a Pythia root is available through config, the persisted managed install, auto-detection, or bootstrap.
 3. Run `pytest -q`.
 4. Validate the host manifest you are targeting.
 5. Exercise a minimal end-to-end workflow in the host:
@@ -377,7 +379,7 @@ The current tests focus on:
 
 ### No roots are available
 
-Start with `list_pythia_roots`.
+On a clean machine with no local Pythia, start with `bootstrap_pythia`. Otherwise start with `list_pythia_roots`.
 
 - If it finds a usable root, use that alias explicitly if needed.
 - If it does not, set `PYTHIA_SIM_ROOT` or create a registry file.
