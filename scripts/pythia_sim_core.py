@@ -2164,6 +2164,22 @@ def _candidate_registry_paths(*, env: Mapping[str, str], platform: str) -> list[
     return unique_candidates
 
 
+def _registry_path_for_bootstrap(
+    registry_path: Path | None,
+    *,
+    env: Mapping[str, str],
+    platform: str,
+) -> Path:
+    if registry_path is not None:
+        return Path(registry_path).expanduser().resolve()
+
+    explicit_registry_path = env.get(PYTHIA_SIM_REGISTRY_PATH_ENV)
+    if isinstance(explicit_registry_path, str) and explicit_registry_path.strip():
+        return _expand_user_path(explicit_registry_path)
+
+    return _candidate_registry_paths(env=env, platform=platform)[0]
+
+
 def _has_prior_root_configuration(
     registry_path: Path | None,
     *,
@@ -3283,9 +3299,11 @@ class PythiaSimulationRunner:
                     )
                 logs.append("Compilation successful.")
 
-        registry_file = _candidate_registry_paths(
-            env=env, platform=platform_name
-        )[0]
+        registry_file = _registry_path_for_bootstrap(
+            self.registry_path,
+            env=env,
+            platform=platform_name,
+        )
         registry_file.parent.mkdir(parents=True, exist_ok=True)
 
         registry_data = {
