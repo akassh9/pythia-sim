@@ -1,8 +1,6 @@
 # `pythia-sim` Feature Notes
 
-`pythia-sim` is a local Codex plugin that exposes standalone Pythia 8 workflows through a stdio MCP server.
-
-The current design is intentionally narrow:
+`pythia-sim` exposes standalone Pythia 8 workflows through a stdio MCP server.
 
 - deterministic text-only tool output
 - bounded standalone compilation and execution
@@ -21,16 +19,14 @@ The plugin provides:
 
 ## Text Output Helpers
 
-The generated helper header `pythia_sim_artifacts.h` still provides:
+The generated helper header `pythia_sim_artifacts.h` provides:
 
 - `emit_text`
 - `emit_json`
 - `emit_csv`
 - `emit_histogram`
 
-Those helpers no longer create persisted artifacts.
-
-Current behavior:
+Those helpers do not create persisted artifacts.
 
 - helper calls emit terminal output blocks into stdout
 - JSON blocks are normalized before results are returned
@@ -58,8 +54,6 @@ Private completed event-record snapshots preserve:
 - `metadata.json`
 - `event_record_summary.json`
 - `event_record_examples.json`
-
-Current retention policy:
 
 - completed snapshots are pruned to the most recent 25 directories
 - temporary run directories are deleted after successful completion
@@ -94,13 +88,13 @@ The follow-up tools consume that `run_id` by reading the private snapshot files 
 
 ## Safety Boundaries
 
-Still supported:
+Supported:
 
 - standalone Pythia headers and safe standard library headers for user code
 - bounded stdout/stderr capture
 - optional example-build fallback when direct compilation fails
 
-Still disallowed:
+Disallowed:
 
 - FastJet, HepMC, ROOT, LHAPDF, Rivet, EvtGen, and similar external integrations
 - filesystem, network, process-spawning, and threading APIs in user-supplied C++

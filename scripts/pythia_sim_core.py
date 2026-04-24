@@ -15,11 +15,12 @@ import tempfile
 import time
 import uuid
 import urllib.request
+from urllib.error import URLError
 import tarfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Mapping, NotRequired, TypedDict, cast
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
@@ -33,6 +34,7 @@ PYTHIA_VERSION_TO_DOWNLOAD = "8317"
 PYTHIA_DOWNLOAD_URL = f"https://pythia.org/download/pythia83/pythia{PYTHIA_VERSION_TO_DOWNLOAD}.tgz"
 PYTHIA_AUTO_ALIAS = f"pythia{PYTHIA_VERSION_TO_DOWNLOAD}"
 
+
 def _current_platform(platform: str | None = None) -> str:
     return platform or sys.platform
 
@@ -41,7 +43,7 @@ def _expand_user_path(raw_path: str) -> Path:
     return Path(raw_path).expanduser().resolve()
 
 
-def _resolve_state_home(*, env: Mapping[str, str], platform: str) -> Path | None:
+def _resolve_state_home(*, env: Mapping[str, str], platform: str) -> Path:
     xdg_state_home = env.get("XDG_STATE_HOME")
     if xdg_state_home:
         return _expand_user_path(xdg_state_home)
@@ -60,44 +62,166 @@ def resolve_state_root(
 
     platform_name = _current_platform(platform)
     state_home = _resolve_state_home(env=env_map, platform=platform_name)
-    if state_home is None:  # pragma: no cover - defensive; current logic always returns a path.
-        return (PLUGIN_ROOT / ".state").resolve()
     if platform_name == "darwin" and "XDG_STATE_HOME" not in env_map:
         return (state_home / "state").resolve()
     return (state_home / "pythia-sim").resolve()
 
 
-def _legacy_registry_path(plugin_root: Path) -> Path:
-    return plugin_root / "config" / "roots.json"
+def _tool_schema(properties: dict[str, object], *, required: list[str] | None = None) -> dict[str, object]:
+    schema = {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": False,
+    }
+    if required:
+        schema["required"] = required
+    return schema
 
 
-def _legacy_runs_tmp_root(plugin_root: Path) -> Path:
-    return plugin_root / ".runs" / "tmp"
+def _string_property(
+    *, description: str | None = None, enum: list[str] | None = None
+) -> dict[str, object]:
+    schema: dict[str, object] = {"type": "string"}
+    if description is not None:
+        schema["description"] = description
+    if enum is not None:
+        schema["enum"] = enum
+    return schema
 
 
-def _legacy_failed_runs_root(plugin_root: Path) -> Path:
-    return plugin_root / ".runs" / "failed"
+def _integer_property(*, minimum: int | None = None, maximum: int | None = None) -> dict[str, object]:
+    schema: dict[str, object] = {"type": "integer"}
+    if minimum is not None:
+        schema["minimum"] = minimum
+    if maximum is not None:
+        schema["maximum"] = maximum
+    return schema
 
 
-def _legacy_completed_runs_root(plugin_root: Path) -> Path:
-    return plugin_root / ".runs" / "completed"
+def _boolean_property(*, description: str | None = None) -> dict[str, object]:
+    schema: dict[str, object] = {"type": "boolean"}
+    if description is not None:
+        schema["description"] = description
+    return schema
 
 
-def _legacy_locks_root(plugin_root: Path) -> Path:
-    return plugin_root / ".locks"
+def _array_property(
+    items: dict[str, object],
+    *,
+    description: str | None = None,
+    min_items: int | None = None,
+    max_items: int | None = None,
+) -> dict[str, object]:
+    schema: dict[str, object] = {"type": "array", "items": items}
+    if description is not None:
+        schema["description"] = description
+    if min_items is not None:
+        schema["minItems"] = min_items
+    if max_items is not None:
+        schema["maxItems"] = max_items
+    return schema
 
 
-DEFAULT_REGISTRY_PATH = _legacy_registry_path(PLUGIN_ROOT)
+def _root_alias_property() -> dict[str, object]:
+    return _string_property(
+        description="Configured Pythia root alias. Defaults to the registry default_alias."
+    )
+
+
+def _runtime_timeout_properties() -> dict[str, object]:
+    return {
+        "compile_timeout_sec": _integer_property(minimum=1, maximum=MAX_COMPILE_TIMEOUT_SEC),
+        "run_timeout_sec": _integer_property(minimum=1, maximum=MAX_RUN_TIMEOUT_SEC),
+        "max_output_bytes": _integer_property(minimum=MIN_OUTPUT_BYTES, maximum=MAX_OUTPUT_BYTES),
+    }
+
+
+def _introspection_request_properties(*, include_run_id: bool = False) -> dict[str, object]:
+    properties: dict[str, object] = {
+        "root_alias": _root_alias_property(),
+        "commands": _array_property(
+            {"type": "string"},
+            description="Pythia readString commands to apply before init().",
+        ),
+        "cmnd_text": _string_property(
+            description="Optional raw .cmnd file text to load as settings.cmnd before init()."
+        ),
+        "event_count": _integer_property(minimum=1, maximum=MAX_INTROSPECTION_EVENT_COUNT),
+        "random_seed": _integer_property(minimum=1),
+        "example_event_limit": _integer_property(
+            minimum=1, maximum=MAX_INTROSPECTION_EXAMPLE_EVENTS
+        ),
+    }
+    properties.update(_runtime_timeout_properties())
+    if include_run_id:
+        properties["run_id"] = _string_property(
+            description="Reuse a previously captured event-record run instead of rerunning the simulation."
+        )
+    return properties
+
+
+def _particle_selector_property() -> dict[str, object]:
+    return _tool_schema(
+        {
+            "pdg_id": _integer_property(),
+            "final_state": _boolean_property(),
+            "charge": _integer_property(),
+            "status_codes": _array_property({"type": "integer"}),
+            "rank_by": _string_property(
+                enum=[TRACE_RANK_BY_PT, TRACE_RANK_BY_ENERGY, TRACE_RANK_BY_ETA_ABS]
+            ),
+            "rank": _integer_property(minimum=1),
+        }
+    )
+
+
+def _trace_options_property() -> dict[str, object]:
+    return _tool_schema(
+        {
+            "direction": _string_property(
+                enum=[TRACE_DIRECTION_ANCESTORS, TRACE_DIRECTION_DESCENDANTS]
+            ),
+            "stop_at": {
+                "oneOf": [
+                    _string_property(
+                        enum=[
+                            TRACE_STOP_AT_HARD_PROCESS_BOSON,
+                            TRACE_STOP_AT_INCOMING_PARTONS,
+                            TRACE_STOP_AT_BEAM,
+                        ]
+                    ),
+                    _array_property({"type": "integer"}),
+                ]
+            },
+            "max_depth": _integer_property(minimum=1, maximum=MAX_TRACE_DEPTH),
+        }
+    )
+
+
+def _decay_chain_property() -> dict[str, object]:
+    return _tool_schema(
+        {
+            "parent_pdg_id": _integer_property(),
+            "child_pdg_id": _integer_property(),
+            "intermediate_pdg_ids": _array_property({"type": "integer"}),
+        },
+        required=["parent_pdg_id", "child_pdg_id"],
+    )
+
+
+def _supporting_file_property() -> dict[str, object]:
+    return _tool_schema(
+        {
+            "name": _string_property(),
+            "content": _string_property(),
+        },
+        required=["name", "content"],
+    )
+
+
 DEFAULT_STATE_ROOT = resolve_state_root()
-RUNS_TMP_ROOT = DEFAULT_STATE_ROOT / "runs" / "tmp"
 FAILED_RUNS_ROOT = DEFAULT_STATE_ROOT / "runs" / "failed"
 COMPLETED_RUNS_ROOT = DEFAULT_STATE_ROOT / "runs" / "completed"
-LOCKS_ROOT = DEFAULT_STATE_ROOT / "locks"
-LEGACY_RUNS_TMP_ROOT = _legacy_runs_tmp_root(PLUGIN_ROOT)
-LEGACY_FAILED_RUNS_ROOT = _legacy_failed_runs_root(PLUGIN_ROOT)
-LEGACY_COMPLETED_RUNS_ROOT = _legacy_completed_runs_root(PLUGIN_ROOT)
-LEGACY_LOCKS_ROOT = _legacy_locks_root(PLUGIN_ROOT)
-
 DEFAULT_BUILD_COMMAND = ["make", "-j2"]
 DEFAULT_COMPILE_TIMEOUT_SEC = 60
 DEFAULT_RUN_TIMEOUT_SEC = 60
@@ -120,8 +244,7 @@ EXAMPLE_SAFETY_MODE_ALL = "all"
 EXAMPLE_SAFETY_TAG_STANDALONE = "standalone_safe"
 EXAMPLE_SAFETY_TAG_EXTERNAL = "requires_external_dep"
 DEFAULT_INTROSPECTION_EVENT_COUNT = 200
-# Event-record captures keep only compact aggregates plus a small bounded sample of example
-# events, so a 10k-event scan stays practical for common standalone studies.
+# Keep event-record scans bounded by storing compact aggregates and a small example sample.
 MAX_INTROSPECTION_EVENT_COUNT = 10_000
 DEFAULT_INTROSPECTION_EXAMPLE_EVENTS = 6
 MAX_INTROSPECTION_EXAMPLE_EVENTS = 12
@@ -156,9 +279,6 @@ TERMINAL_OUTPUT_KINDS = {
 SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 TERMINAL_OUTPUT_BEGIN_RE = re.compile(
     r"^<<PYTHIA_SIM_OUTPUT_BEGIN name=(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,127}) kind=(?P<kind>[a-z]+)>>$"
-)
-TERMINAL_OUTPUT_END_RE = re.compile(
-    r"^<<PYTHIA_SIM_OUTPUT_END name=(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,127}) kind=(?P<kind>[a-z]+)>>$"
 )
 DISALLOWED_SUPPORTING_SUFFIXES = {
     ".c",
@@ -350,8 +470,8 @@ class EventRecordSimulationSpec:
 @dataclass(frozen=True)
 class SimulationLifecycleResult:
     bootstrap_performed: bool
-    compile_result: dict[str, Any]
-    run_result: dict[str, Any]
+    compile_result: CompileResult
+    run_result: RunResult
 
 
 @dataclass(frozen=True)
@@ -378,6 +498,290 @@ class DecayChainQuery:
     intermediate_pdg_ids: list[int]
 
 
+class CountEntry(TypedDict):
+    key: str
+    count: int
+
+
+class SupportingFilePayload(TypedDict):
+    name: str
+    content: str
+
+
+class CompileResult(TypedDict):
+    ok: bool
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    command_summary: str
+
+
+class RunResult(TypedDict):
+    ok: bool
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    timed_out: bool
+
+
+class RootInspection(TypedDict):
+    alias: str
+    path: str
+    build_status: str
+    detected_compiler: str | None
+    standalone_execution_available: bool
+
+
+class RootListPayload(TypedDict):
+    default_alias: str
+    roots: list[RootInspection]
+
+
+class BootstrapPayload(TypedDict):
+    ok: bool
+    alias: str
+    path: str
+    registry_path: str
+    logs: str
+
+
+class ExampleSearchResult(TypedDict, total=False):
+    path: str
+    name: str
+    file_kind: str
+    safety: str
+    snippet: str
+    line_number: int
+
+
+class ExampleSearchPayload(TypedDict):
+    root_alias: str
+    root_path: str
+    examples_path: str
+    query: str
+    include_cmnd: bool
+    safety_mode: str
+    searched_file_count: int
+    match_count: int
+    filtered_match_count: int
+    returned_count: int
+    truncated: bool
+    results: list[ExampleSearchResult]
+
+
+class ParticleSnapshot(TypedDict, total=False):
+    index: int
+    id: int
+    status: int
+    mother1: int
+    mother2: int
+    daughter1: int
+    daughter2: int
+    pt: float
+    energy: float
+    eta: float
+    charge: float
+    is_final: bool
+
+
+class EventSnapshot(TypedDict, total=False):
+    accepted_event_index: int
+    score: float
+    selected_particle_indices: list[int]
+    particles: list[ParticleSnapshot]
+
+
+class EventRecordSummaryJson(TypedDict, total=False):
+    version: int
+    requested_event_count: int
+    accepted_event_count: int
+    failed_event_count: int
+    particle_pdg_counts: dict[str, int]
+    final_state_pdg_counts: dict[str, int]
+    status_code_counts: dict[str, int]
+    final_state_multiplicity_counts: dict[str, int]
+    decay_chain_counts: dict[str, int]
+    decay_chain_counts_complete: bool
+    collapsed_decay_chain_counts: dict[str, int]
+    exact_decay_chain_counts: dict[str, int]
+
+
+class EventRecordExamplesJson(TypedDict, total=False):
+    version: int
+    stored_event_count: int
+    events: list[EventSnapshot]
+    sampling_strategy: str
+
+
+class EventRecordMetadataJson(TypedDict, total=False):
+    run_id: str
+    root_alias: str | None
+    bootstrap_performed: bool
+    request: RequestPayload
+    compile: CompileResult
+    run: RunResult
+    created_at_epoch_sec: int
+
+
+class RequestPayload(TypedDict):
+    run_id: str
+    root_alias: str
+    compile_timeout_sec: int
+    run_timeout_sec: int
+    max_output_bytes: int
+    supporting_files: list[SupportingFilePayload]
+
+
+class RunLifecyclePayload(TypedDict):
+    run_id: str
+    root_alias: str | None
+    bootstrap_performed: bool
+    compile: CompileResult
+    run: RunResult
+
+
+class FailureRunPayload(RunLifecyclePayload, total=False):
+    failure_artifacts_path: str
+
+
+class AnalysisPayloadBase(RunLifecyclePayload, total=False):
+    analysis_ok: bool
+    message: str
+    failure_artifacts_path: str
+    used_existing_run: bool
+
+
+class EventRecordAnalysisPayload(AnalysisPayloadBase, total=False):
+    event_record: EventRecordSummary
+
+
+class EventRecordSummary(TypedDict):
+    requested_event_count: int | None
+    accepted_event_count: int | None
+    failed_event_count: int | None
+    stored_example_event_count: int | None
+    top_particle_pdg_counts: list[CountEntry]
+    top_final_state_pdg_counts: list[CountEntry]
+    top_status_code_counts: list[CountEntry]
+    top_decay_chain_counts: list[CountEntry]
+
+
+class SelectedEventSummary(TypedDict):
+    accepted_event_index: int | None
+    score: float | int | None
+
+
+class SelectedParticleSummary(TypedDict):
+    rank_index: int
+    index: int | None
+    id: int | None
+    status: int | None
+    pt: float | int | None
+    energy: float | int | None
+    eta: float | int | None
+    charge: float | int | None
+    is_final: bool | None
+
+
+class ParticleSelectorPayload(TypedDict):
+    pdg_id: int | None
+    final_state: bool
+    charge: int | None
+    status_codes: list[int]
+    rank_by: str
+    rank: int
+
+
+class TraceOptionsPayload(TypedDict):
+    direction: str
+    stop_at: str | list[int] | None
+    max_depth: int
+
+
+class LineageNode(TypedDict):
+    index: int | None
+    id: int | None
+    status: int | None
+    pt: float | int | None
+    energy: float | int | None
+    eta: float | int | None
+    charge: float | int | None
+    is_final: bool | None
+    relation: str
+    depth: int
+
+
+class LineageRepresentativeMatch(TypedDict):
+    accepted_event_index: int | None
+    matches: list[list[LineageNode]]
+
+
+class TraceLineageAnalysis(AnalysisPayloadBase, total=False):
+    selected_event: NotRequired[SelectedEventSummary]
+    selected_particle: NotRequired[SelectedParticleSummary]
+    lineage_paths: NotRequired[list[list[LineageNode]]]
+    matched_stop_nodes: NotRequired[list[LineageNode]]
+    trace_options: NotRequired[TraceOptionsPayload]
+    particle_selector: NotRequired[ParticleSelectorPayload]
+
+
+class DecayChainQueryPayload(TypedDict):
+    parent_pdg_id: int
+    child_pdg_id: int
+    intermediate_pdg_ids: list[int]
+
+
+class DecayChainAnalysis(TypedDict, total=False):
+    query: DecayChainQueryPayload
+    chain_key: str
+    match_semantics: str
+    summary_histogram_complete: bool
+    summary_count_source: str
+    summary_match_count: int
+    example_snapshot_match_count: int
+    example_snapshot_match_event_count: int
+    stored_example_event_count: int | None
+    representative_matches: list[LineageRepresentativeMatch]
+    match_count: int
+
+
+class DecayChainResult(AnalysisPayloadBase, total=False):
+    decay_chain: NotRequired[DecayChainAnalysis]
+
+
+class StatusCodeExplanation(TypedDict):
+    code: int
+    abs_code: int
+    sign: str
+    category: str
+    range: str | None
+    description: str
+    is_final_state: bool
+    observed_count: NotRequired[int]
+
+
+class StatusCodeResult(TypedDict, total=False):
+    analysis_ok: bool
+    run_id: str
+    root_alias: str | None
+    bootstrap_performed: bool
+    compile: CompileResult
+    run: RunResult
+    status_code_explanations: list[StatusCodeExplanation]
+
+
+class EventRecordBundle(TypedDict):
+    run_id: str
+    root_alias: str | None
+    snapshot_path: str
+    metadata: EventRecordMetadataJson
+    summary: EventRecordSummaryJson
+    examples: EventRecordExamplesJson
+    compile: CompileResult
+    run: RunResult
+    bootstrap_performed: bool
+
+
 def _strip_comments_and_strings(source: str) -> str:
     source = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
     source = re.sub(r"//.*", "", source)
@@ -393,11 +797,65 @@ def _format_stage_output(stage_name: str, text: str) -> str:
     return f"[{stage_name}]\n{text}{suffix}"
 
 
+def _empty_compile_result() -> CompileResult:
+    return {
+        "ok": False,
+        "exit_code": None,
+        "stdout": "",
+        "stderr": "",
+        "command_summary": "",
+    }
+
+
+def _empty_run_result() -> RunResult:
+    return {
+        "ok": False,
+        "exit_code": None,
+        "stdout": "",
+        "stderr": "",
+        "timed_out": False,
+    }
+
+
+def _build_compile_result(
+    *,
+    ok: bool,
+    exit_code: int | None,
+    stdout: str,
+    stderr: str,
+    command_summary: str,
+) -> CompileResult:
+    return {
+        "ok": ok,
+        "exit_code": exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "command_summary": command_summary,
+    }
+
+
+def _build_run_result(
+    *,
+    ok: bool,
+    exit_code: int | None,
+    stdout: str,
+    stderr: str,
+    timed_out: bool,
+) -> RunResult:
+    return {
+        "ok": ok,
+        "exit_code": exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "timed_out": timed_out,
+    }
+
+
 def _shell_join(command: list[str]) -> str:
     return shlex.join(command)
 
 
-def _coerce_timeout(value: Any, *, name: str, default: int, maximum: int) -> int:
+def _coerce_timeout(value: object, *, name: str, default: int, maximum: int) -> int:
     if value is None:
         return default
     if isinstance(value, bool) or not isinstance(value, int):
@@ -409,7 +867,7 @@ def _coerce_timeout(value: Any, *, name: str, default: int, maximum: int) -> int
     return value
 
 
-def _coerce_output_cap(value: Any) -> int:
+def _coerce_output_cap(value: object) -> int:
     if value is None:
         return DEFAULT_MAX_OUTPUT_BYTES
     if isinstance(value, bool) or not isinstance(value, int):
@@ -421,7 +879,7 @@ def _coerce_output_cap(value: Any) -> int:
     return value
 
 
-def _reject_removed_artifact_cap(arguments: dict[str, Any]) -> None:
+def _reject_removed_artifact_cap(arguments: Mapping[str, object]) -> None:
     if "max_artifact_bytes" in arguments:
         raise PythiaSimError(
             "max_artifact_bytes is no longer supported; artifact output has been removed. "
@@ -429,7 +887,7 @@ def _reject_removed_artifact_cap(arguments: dict[str, Any]) -> None:
         )
 
 
-def _coerce_example_search_results(value: Any) -> int:
+def _coerce_example_search_results(value: object) -> int:
     if value is None:
         return DEFAULT_EXAMPLE_SEARCH_RESULTS
     if isinstance(value, bool) or not isinstance(value, int):
@@ -441,7 +899,7 @@ def _coerce_example_search_results(value: Any) -> int:
     return value
 
 
-def _coerce_optional_bool(value: Any, *, name: str, default: bool) -> bool:
+def _coerce_optional_bool(value: object, *, name: str, default: bool) -> bool:
     if value is None:
         return default
     if not isinstance(value, bool):
@@ -449,7 +907,7 @@ def _coerce_optional_bool(value: Any, *, name: str, default: bool) -> bool:
     return value
 
 
-def _coerce_example_safety_mode(value: Any) -> str:
+def _coerce_example_safety_mode(value: object) -> str:
     if value is None:
         return EXAMPLE_SAFETY_MODE_STANDALONE_ONLY
     if not isinstance(value, str) or not value:
@@ -461,7 +919,7 @@ def _coerce_example_safety_mode(value: Any) -> str:
     return value
 
 
-def _coerce_introspection_event_count(value: Any) -> int:
+def _coerce_introspection_event_count(value: object) -> int:
     if value is None:
         return DEFAULT_INTROSPECTION_EVENT_COUNT
     if isinstance(value, bool) or not isinstance(value, int):
@@ -473,7 +931,7 @@ def _coerce_introspection_event_count(value: Any) -> int:
     return value
 
 
-def _coerce_example_event_limit(value: Any) -> int:
+def _coerce_example_event_limit(value: object) -> int:
     if value is None:
         return DEFAULT_INTROSPECTION_EXAMPLE_EVENTS
     if isinstance(value, bool) or not isinstance(value, int):
@@ -487,7 +945,7 @@ def _coerce_example_event_limit(value: Any) -> int:
     return value
 
 
-def _coerce_optional_seed(value: Any) -> int | None:
+def _coerce_optional_seed(value: object) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
@@ -498,7 +956,7 @@ def _coerce_optional_seed(value: Any) -> int | None:
 
 
 def _coerce_int_list(
-    value: Any,
+    value: object,
     *,
     name: str,
     maximum_length: int | None = None,
@@ -520,7 +978,7 @@ def _coerce_int_list(
     return items
 
 
-def _validate_commands(value: Any) -> list[str]:
+def _validate_commands(value: object) -> list[str]:
     if value is None:
         return []
     if not isinstance(value, list):
@@ -545,7 +1003,7 @@ def _validate_commands(value: Any) -> list[str]:
     return commands
 
 
-def _validate_cmnd_text(value: Any) -> str | None:
+def _validate_cmnd_text(value: object) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
@@ -605,7 +1063,7 @@ def _reject_known_unsupported_silencing_settings(
         )
 
 
-def validate_event_record_simulation_spec(arguments: dict[str, Any]) -> EventRecordSimulationSpec:
+def validate_event_record_simulation_spec(arguments: Mapping[str, object]) -> EventRecordSimulationSpec:
     _reject_removed_artifact_cap(arguments)
     root_alias = arguments.get("root_alias")
     if root_alias is not None and (not isinstance(root_alias, str) or not root_alias):
@@ -638,7 +1096,7 @@ def validate_event_record_simulation_spec(arguments: dict[str, Any]) -> EventRec
     )
 
 
-def validate_particle_selector(value: Any) -> ParticleSelector:
+def validate_particle_selector(value: object) -> ParticleSelector:
     if value is None:
         value = {}
     if not isinstance(value, dict):
@@ -678,7 +1136,7 @@ def validate_particle_selector(value: Any) -> ParticleSelector:
     )
 
 
-def validate_trace_options(value: Any) -> TraceOptions:
+def validate_trace_options(value: object) -> TraceOptions:
     if value is None:
         value = {}
     if not isinstance(value, dict):
@@ -716,7 +1174,7 @@ def validate_trace_options(value: Any) -> TraceOptions:
     return TraceOptions(direction=direction, stop_at=stop_at, max_depth=max_depth)
 
 
-def validate_decay_chain_query(value: Any) -> DecayChainQuery:
+def validate_decay_chain_query(value: object) -> DecayChainQuery:
     if not isinstance(value, dict):
         raise PythiaSimError("decay_chain must be an object.")
     parent_pdg_id = value.get("parent_pdg_id")
@@ -737,7 +1195,7 @@ def validate_decay_chain_query(value: Any) -> DecayChainQuery:
     )
 
 
-def _normalize_status_code_list(value: Any) -> list[int]:
+def _normalize_status_code_list(value: object) -> list[int]:
     codes = _coerce_int_list(value, name="status_codes", maximum_length=MAX_STATUS_CODES_QUERY)
     if not codes:
         raise PythiaSimError("status_codes must contain at least one integer.")
@@ -760,23 +1218,17 @@ def _decay_chain_query_ids(chain_query: DecayChainQuery) -> list[int]:
 
 
 def _resolve_decay_chain_histogram(
-    summary: dict[str, Any],
-) -> tuple[dict[str, Any], str, bool, str]:
+    summary: EventRecordSummaryJson,
+) -> tuple[dict[str, int], str, bool, str]:
     collapsed_counts = summary.get("collapsed_decay_chain_counts")
     if isinstance(collapsed_counts, dict):
         return (
-            collapsed_counts,
+            cast(dict[str, int], collapsed_counts),
             "collapse_same_id_hops",
             bool(summary.get("decay_chain_counts_complete") is True),
             "collapsed_histogram",
         )
-    exact_counts = summary.get("decay_chain_counts")
-    if isinstance(exact_counts, dict):
-        return exact_counts, "exact_immediate_legacy", False, "legacy_decay_chain_counts"
-    exact_counts = summary.get("exact_decay_chain_counts")
-    if isinstance(exact_counts, dict):
-        return exact_counts, "exact_immediate_legacy", False, "exact_histogram"
-    return {}, "exact_immediate_legacy", False, "unavailable"
+    return {}, "collapse_same_id_hops", False, "unavailable"
 
 
 def _artifact_helper_header_source() -> str:
@@ -1692,9 +2144,7 @@ def autodetect_pythia_root(env: Mapping[str, str] | None = None) -> DetectedPyth
     return None
 
 
-def _candidate_registry_paths(
-    *, plugin_root: Path, env: Mapping[str, str], platform: str
-) -> list[Path]:
+def _candidate_registry_paths(*, env: Mapping[str, str], platform: str) -> list[Path]:
     candidates: list[Path] = []
     xdg_config_home = env.get("XDG_CONFIG_HOME")
     if xdg_config_home:
@@ -1703,7 +2153,6 @@ def _candidate_registry_paths(
         candidates.append(Path.home() / ".pythia-sim" / "roots.json")
     else:
         candidates.append(Path.home() / ".config" / "pythia-sim" / "roots.json")
-    candidates.append(_legacy_registry_path(plugin_root))
     unique_candidates: list[Path] = []
     seen: set[Path] = set()
     for candidate in candidates:
@@ -1718,7 +2167,6 @@ def _candidate_registry_paths(
 def _has_prior_root_configuration(
     registry_path: Path | None,
     *,
-    plugin_root: Path,
     env: Mapping[str, str],
     platform: str,
 ) -> bool:
@@ -1736,7 +2184,6 @@ def _has_prior_root_configuration(
     return any(
         candidate.is_file()
         for candidate in _candidate_registry_paths(
-            plugin_root=plugin_root,
             env=env,
             platform=platform,
         )
@@ -1750,6 +2197,7 @@ def load_registry(
     env: Mapping[str, str] | None = None,
     platform: str | None = None,
 ) -> RootRegistry:
+    del plugin_root
     env_map = os.environ if env is None else env
     if registry_path is not None:
         return _load_registry_file(Path(registry_path).expanduser().resolve())
@@ -1764,7 +2212,8 @@ def load_registry(
 
     platform_name = _current_platform(platform)
     candidates = _candidate_registry_paths(
-        plugin_root=plugin_root, env=env_map, platform=platform_name
+        env=env_map,
+        platform=platform_name,
     )
     for candidate in candidates:
         if candidate.is_file():
@@ -1864,7 +2313,7 @@ def validate_source_cpp(source_cpp: str) -> None:
             raise PythiaSimError(message)
 
 
-def validate_supporting_files(raw_files: Any) -> list[SupportingFile]:
+def validate_supporting_files(raw_files: object) -> list[SupportingFile]:
     if raw_files is None:
         return []
     if not isinstance(raw_files, list):
@@ -1907,14 +2356,14 @@ def validate_supporting_files(raw_files: Any) -> list[SupportingFile]:
     return files
 
 
-def _supporting_files_for_event_record(spec: EventRecordSimulationSpec) -> list[dict[str, str]]:
-    supporting_files: list[dict[str, str]] = []
+def _supporting_files_for_event_record(spec: EventRecordSimulationSpec) -> list[SupportingFilePayload]:
+    supporting_files: list[SupportingFilePayload] = []
     if spec.cmnd_text is not None:
         supporting_files.append({"name": "settings.cmnd", "content": spec.cmnd_text})
     return supporting_files
 
 
-def _top_counts(mapping: Any, *, limit: int = 10) -> list[dict[str, Any]]:
+def _top_counts(mapping: object, *, limit: int = 10) -> list[CountEntry]:
     if not isinstance(mapping, dict):
         return []
     items: list[tuple[str, int]] = []
@@ -1929,22 +2378,22 @@ def _top_counts(mapping: Any, *, limit: int = 10) -> list[dict[str, Any]]:
     return [{"key": key, "count": count} for key, count in items[:limit]]
 
 
-def _base_payload_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
+def _base_payload_from_bundle(bundle: EventRecordBundle) -> AnalysisPayloadBase:
     return {
         "run_id": bundle["run_id"],
         "root_alias": bundle.get("root_alias"),
         "bootstrap_performed": bundle.get("bootstrap_performed", False),
-        "compile": bundle.get("compile", {}),
-        "run": bundle.get("run", {}),
+        "compile": cast(CompileResult, bundle.get("compile", _empty_compile_result())),
+        "run": cast(RunResult, bundle.get("run", _empty_run_result())),
     }
 
 
-def _event_record_summary_payload(bundle: dict[str, Any]) -> dict[str, Any]:
+def _event_record_summary_payload(bundle: EventRecordBundle) -> EventRecordAnalysisPayload:
     summary = bundle["summary"]
     examples = bundle["examples"]
     decay_chain_counts, _, _, _ = _resolve_decay_chain_histogram(summary)
     payload = _base_payload_from_bundle(bundle)
-    payload["event_record"] = {
+    event_record: EventRecordSummary = {
         "requested_event_count": summary.get("requested_event_count"),
         "accepted_event_count": summary.get("accepted_event_count"),
         "failed_event_count": summary.get("failed_event_count"),
@@ -1954,17 +2403,17 @@ def _event_record_summary_payload(bundle: dict[str, Any]) -> dict[str, Any]:
         "top_status_code_counts": _top_counts(summary.get("status_code_counts")),
         "top_decay_chain_counts": _top_counts(decay_chain_counts),
     }
+    payload["event_record"] = event_record
     return payload
 
 
-def inspect_root(root: RootEntry) -> dict[str, Any]:
+def inspect_root(root: RootEntry) -> RootInspection:
     layout = describe_root_layout(root.path)
-    compiler = None
-    if layout.makefile_inc_path is not None:
-        try:
-            compiler = parse_makefile_inc(layout.makefile_inc_path).get("CXX")
-        except PythiaSimError:
-            compiler = None
+    compiler = (
+        cast(str | None, parse_makefile_inc(layout.makefile_inc_path).get("CXX"))
+        if layout.makefile_inc_path is not None
+        else None
+    )
     standalone_execution_available = (
         layout.build_status == "ready"
         and layout.include_dir is not None
@@ -2128,7 +2577,7 @@ def preserve_failure_run(run_dir: Path, failed_root: Path = FAILED_RUNS_ROOT) ->
     return destination
 
 
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
+def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
@@ -2148,7 +2597,7 @@ STATUS_CODE_EXACT_DESCRIPTIONS: dict[int, str] = {
 }
 
 
-def explain_status_code(code: int) -> dict[str, Any]:
+def explain_status_code(code: int) -> StatusCodeExplanation:
     sign = "negative" if code < 0 else "positive"
     magnitude = abs(code)
     description = STATUS_CODE_EXACT_DESCRIPTIONS.get(code)
@@ -2177,7 +2626,7 @@ def explain_status_code(code: int) -> dict[str, Any]:
     }
 
 
-def _load_json_file(path: Path, *, label: str) -> dict[str, Any]:
+def _load_json_file(path: Path, *, label: str) -> dict[str, object]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -2193,16 +2642,10 @@ def _resolve_completed_run_dir(
     run_id: str,
     *,
     completed_root: Path,
-    legacy_completed_root: Path | None = None,
 ) -> Path:
-    candidates = [completed_root / run_id]
-    if legacy_completed_root is not None:
-        legacy_candidate = legacy_completed_root / run_id
-        if legacy_candidate not in candidates:
-            candidates.append(legacy_candidate)
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate
+    run_dir = completed_root / run_id
+    if run_dir.is_dir():
+        return run_dir
     raise PythiaSimError(f"Completed run not found for run_id '{run_id}'.")
 
 
@@ -2210,32 +2653,43 @@ def _load_event_record_bundle(
     run_id: str,
     *,
     completed_root: Path = COMPLETED_RUNS_ROOT,
-    legacy_completed_root: Path | None = LEGACY_COMPLETED_RUNS_ROOT,
-) -> dict[str, Any]:
+    legacy_completed_root: Path | None = None,
+) -> EventRecordBundle:
     if not isinstance(run_id, str) or not run_id:
         raise PythiaSimError("run_id must be a non-empty string.")
-    run_dir = _resolve_completed_run_dir(
-        run_id, completed_root=completed_root, legacy_completed_root=legacy_completed_root
-    )
+    try:
+        run_dir = _resolve_completed_run_dir(run_id, completed_root=completed_root)
+    except PythiaSimError:
+        if legacy_completed_root is None:
+            raise
+        run_dir = _resolve_completed_run_dir(run_id, completed_root=legacy_completed_root)
 
-    metadata = _load_json_file(run_dir / "metadata.json", label="completed run metadata")
-    summary = _load_json_file(run_dir / EVENT_RECORD_SUMMARY_ARTIFACT, label=EVENT_RECORD_SUMMARY_ARTIFACT)
-    examples = _load_json_file(
-        run_dir / EVENT_RECORD_EXAMPLES_ARTIFACT, label=EVENT_RECORD_EXAMPLES_ARTIFACT
+    metadata = cast(
+        EventRecordMetadataJson,
+        _load_json_file(run_dir / "metadata.json", label="completed run metadata"),
+    )
+    summary = cast(
+        EventRecordSummaryJson,
+        _load_json_file(run_dir / EVENT_RECORD_SUMMARY_ARTIFACT, label=EVENT_RECORD_SUMMARY_ARTIFACT),
+    )
+    examples = cast(
+        EventRecordExamplesJson,
+        _load_json_file(run_dir / EVENT_RECORD_EXAMPLES_ARTIFACT, label=EVENT_RECORD_EXAMPLES_ARTIFACT),
     )
     return {
         "run_id": run_id,
-        "root_alias": metadata.get("root_alias"),
+        "root_alias": cast(str | None, metadata.get("root_alias")),
         "snapshot_path": str(run_dir),
         "metadata": metadata,
         "summary": summary,
         "examples": examples,
-        "compile": metadata.get("compile", {}),
-        "run": metadata.get("run", {}),
-        "bootstrap_performed": metadata.get("bootstrap_performed", False),
+        "compile": cast(CompileResult, metadata.get("compile", _empty_compile_result())),
+        "run": cast(RunResult, metadata.get("run", _empty_run_result())),
+        "bootstrap_performed": bool(metadata.get("bootstrap_performed", False)),
     }
 
-def _particle_rank_value(particle: dict[str, Any], rank_by: str) -> float:
+
+def _particle_rank_value(particle: ParticleSnapshot, rank_by: str) -> float:
     if rank_by == TRACE_RANK_BY_ENERGY:
         return float(particle.get("energy", 0.0))
     if rank_by == TRACE_RANK_BY_ETA_ABS:
@@ -2249,7 +2703,7 @@ def _charge_matches(actual_charge: float, requested_charge: int) -> bool:
     return actual_charge * requested_charge > 0.0
 
 
-def _particle_matches_selector(particle: dict[str, Any], selector: ParticleSelector) -> bool:
+def _particle_matches_selector(particle: ParticleSnapshot, selector: ParticleSelector) -> bool:
     if selector.pdg_id is not None and particle.get("id") != selector.pdg_id:
         return False
     if selector.final_state and not particle.get("is_final", False):
@@ -2263,19 +2717,17 @@ def _particle_matches_selector(particle: dict[str, Any], selector: ParticleSelec
     return True
 
 
-def _particle_by_index(event: dict[str, Any], particle_index: int) -> dict[str, Any] | None:
+def _particle_by_index(event: EventSnapshot, particle_index: int) -> ParticleSnapshot | None:
     particles = event.get("particles")
     if not isinstance(particles, list):
         return None
     for particle in particles:
         if isinstance(particle, dict) and particle.get("index") == particle_index:
-            return particle
+            return cast(ParticleSnapshot, particle)
     return None
 
 
-def _neighbor_indices(
-    particle: dict[str, Any], *, direction: str
-) -> list[int]:
+def _neighbor_indices(particle: ParticleSnapshot, *, direction: str) -> list[int]:
     if direction == TRACE_DIRECTION_DESCENDANTS:
         start = particle.get("daughter1", 0)
         end = particle.get("daughter2", 0)
@@ -2294,23 +2746,23 @@ def _neighbor_indices(
     return list(range(start, end + 1))
 
 
-def _is_hard_process_boson(particle: dict[str, Any]) -> bool:
+def _is_hard_process_boson(particle: ParticleSnapshot) -> bool:
     particle_id = abs(int(particle.get("id", 0)))
     return particle_id in {22, 23, 24, 25, 32, 33, 34, 35, 36, 37, 39}
 
 
-def _is_incoming_parton(particle: dict[str, Any]) -> bool:
+def _is_incoming_parton(particle: ParticleSnapshot) -> bool:
     particle_id = abs(int(particle.get("id", 0)))
     status = int(particle.get("status", 0))
     return status < 0 and (1 <= particle_id <= 9 or particle_id == 21)
 
 
-def _is_beam_particle(particle: dict[str, Any]) -> bool:
+def _is_beam_particle(particle: ParticleSnapshot) -> bool:
     index = int(particle.get("index", -1))
     return index in {1, 2} or abs(int(particle.get("status", 0))) in range(11, 20)
 
 
-def _trace_stop_match(particle: dict[str, Any], stop_at: str | list[int] | None) -> bool:
+def _trace_stop_match(particle: ParticleSnapshot, stop_at: str | list[int] | None) -> bool:
     if stop_at is None:
         return False
     if isinstance(stop_at, list):
@@ -2324,15 +2776,19 @@ def _trace_stop_match(particle: dict[str, Any], stop_at: str | list[int] | None)
     return False
 
 
-def _format_particle_node(particle: dict[str, Any], *, relation: str, depth: int) -> dict[str, Any]:
+def _format_particle_node(particle: ParticleSnapshot, *, relation: str, depth: int) -> LineageNode:
+    pt = particle.get("pt")
+    energy = particle.get("energy")
+    eta = particle.get("eta")
+    charge = particle.get("charge")
     return {
         "index": particle.get("index"),
         "id": particle.get("id"),
         "status": particle.get("status"),
-        "pt": particle.get("pt"),
-        "energy": particle.get("energy"),
-        "eta": particle.get("eta"),
-        "charge": particle.get("charge"),
+        "pt": None if pt is None else float(pt),
+        "energy": None if energy is None else float(energy),
+        "eta": None if eta is None else float(eta),
+        "charge": None if charge is None else float(charge),
         "is_final": particle.get("is_final"),
         "relation": relation,
         "depth": depth,
@@ -2340,17 +2796,17 @@ def _format_particle_node(particle: dict[str, Any], *, relation: str, depth: int
 
 
 def _build_lineage_paths(
-    event: dict[str, Any],
+    event: EventSnapshot,
     particle_index: int,
     trace_options: TraceOptions,
-) -> list[list[dict[str, Any]]]:
+) -> list[list[LineageNode]]:
     start = _particle_by_index(event, particle_index)
     if start is None:
         raise PythiaSimError(f"Particle index {particle_index} was not found in the stored event snapshot.")
 
-    paths: list[list[dict[str, Any]]] = []
+    paths: list[list[LineageNode]] = []
 
-    def walk(current: dict[str, Any], depth: int, path: list[dict[str, Any]], visited: set[int]) -> None:
+    def walk(current: ParticleSnapshot, depth: int, path: list[LineageNode], visited: set[int]) -> None:
         node_index = int(current.get("index", -1))
         relation = "target" if depth == 0 else trace_options.direction[:-1]
         node = _format_particle_node(current, relation=relation, depth=depth)
@@ -2379,32 +2835,34 @@ def _build_lineage_paths(
 
 
 def _select_particle_from_examples(
-    bundle: dict[str, Any], selector: ParticleSelector
-) -> tuple[dict[str, Any], dict[str, Any], int]:
+    bundle: EventRecordBundle, selector: ParticleSelector
+) -> tuple[EventSnapshot, ParticleSnapshot, int]:
     examples = bundle["examples"]
     events = examples.get("events")
     if not isinstance(events, list):
         raise PythiaSimError("Stored event_record_examples.json does not contain an events array.")
-    matches: list[tuple[float, int, int, dict[str, Any], dict[str, Any]]] = []
+    matches: list[tuple[float, int, int, EventSnapshot, ParticleSnapshot]] = []
     for event in events:
         if not isinstance(event, dict):
             continue
-        particles = event.get("particles")
+        event_snapshot = cast(EventSnapshot, event)
+        particles = event_snapshot.get("particles")
         if not isinstance(particles, list):
             continue
         for particle in particles:
             if not isinstance(particle, dict):
                 continue
-            if not _particle_matches_selector(particle, selector):
+            particle_snapshot = cast(ParticleSnapshot, particle)
+            if not _particle_matches_selector(particle_snapshot, selector):
                 continue
-            score = _particle_rank_value(particle, selector.rank_by)
+            score = _particle_rank_value(particle_snapshot, selector.rank_by)
             matches.append(
                 (
                     score,
-                    int(event.get("accepted_event_index", 0)),
-                    int(particle.get("index", 0)),
-                    event,
-                    particle,
+                    int(event_snapshot.get("accepted_event_index", 0)),
+                    int(particle_snapshot.get("index", 0)),
+                    event_snapshot,
+                    particle_snapshot,
                 )
             )
     matches.sort(key=lambda item: (-item[0], item[1], item[2]))
@@ -2417,15 +2875,15 @@ def _select_particle_from_examples(
 
 
 def _chain_match_sequences(
-    event: dict[str, Any],
+    event: EventSnapshot,
     chain_query: DecayChainQuery,
     *,
     collapse_same_id_hops: bool,
-) -> list[list[dict[str, Any]]]:
+) -> list[list[LineageNode]]:
     target_ids = _decay_chain_query_ids(chain_query)
-    matches: list[list[dict[str, Any]]] = []
+    matches: list[list[LineageNode]] = []
 
-    def descend(current: dict[str, Any], target_offset: int, path: list[dict[str, Any]]) -> None:
+    def descend(current: ParticleSnapshot, target_offset: int, path: list[LineageNode]) -> None:
         path = [*path, _format_particle_node(current, relation="chain", depth=target_offset)]
         if target_offset == len(target_ids) - 1:
             matches.append(path)
@@ -2451,19 +2909,19 @@ def _chain_match_sequences(
             isinstance(particle, dict)
             and int(particle.get("id", 0)) == chain_query.parent_pdg_id
         ):
-            descend(particle, 0, [])
+            descend(cast(ParticleSnapshot, particle), 0, [])
     return matches
 
 
 def _scan_decay_chain_example_matches(
-    examples: dict[str, Any],
+    examples: dict[str, object],
     chain_query: DecayChainQuery,
     *,
     collapse_same_id_hops: bool,
-) -> tuple[int, int, list[dict[str, Any]]]:
+) -> tuple[int, int, list[LineageRepresentativeMatch]]:
     total_match_count = 0
     matched_event_count = 0
-    representative_matches: list[dict[str, Any]] = []
+    representative_matches: list[LineageRepresentativeMatch] = []
 
     events = examples.get("events")
     if not isinstance(events, list):
@@ -2472,8 +2930,9 @@ def _scan_decay_chain_example_matches(
     for event in events:
         if not isinstance(event, dict):
             continue
+        event_snapshot = cast(dict[str, object], event)
         matches = _chain_match_sequences(
-            event,
+            event_snapshot,
             chain_query,
             collapse_same_id_hops=collapse_same_id_hops,
         )
@@ -2484,7 +2943,7 @@ def _scan_decay_chain_example_matches(
         if len(representative_matches) < 3:
             representative_matches.append(
                 {
-                    "accepted_event_index": event.get("accepted_event_index"),
+                    "accepted_event_index": event_snapshot.get("accepted_event_index"),
                     "matches": matches[:3],
                 }
             )
@@ -2661,20 +3120,16 @@ class PythiaSimulationRunner:
         self.failed_runs_root = self.state_root / "runs" / "failed"
         self.completed_runs_root = self.state_root / "runs" / "completed"
         self.locks_root = self.state_root / "locks"
-        self.legacy_runs_tmp_root = _legacy_runs_tmp_root(plugin_root)
-        self.legacy_failed_runs_root = _legacy_failed_runs_root(plugin_root)
-        self.legacy_completed_runs_root = _legacy_completed_runs_root(plugin_root)
-        self.legacy_locks_root = _legacy_locks_root(plugin_root)
 
-    def list_pythia_roots(self) -> dict[str, Any]:
-        registry = load_registry(self.registry_path, plugin_root=self.plugin_root)
+    def list_pythia_roots(self) -> RootListPayload:
+        registry = load_registry(self.registry_path)
         roots = [inspect_root(entry) for entry in registry.roots.values()]
         return {
             "default_alias": registry.default_alias,
             "roots": roots,
         }
 
-    def bootstrap_pythia(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def bootstrap_pythia(self, arguments: Mapping[str, object]) -> BootstrapPayload:
         env = os.environ.copy()
         vendor_dir = self.state_root / "vendor"
         vendor_dir.mkdir(parents=True, exist_ok=True)
@@ -2684,7 +3139,6 @@ class PythiaSimulationRunner:
         platform_name = _current_platform()
         should_search_existing_install = _has_prior_root_configuration(
             self.registry_path,
-            plugin_root=self.plugin_root,
             env=env,
             platform=platform_name,
         )
@@ -2800,15 +3254,15 @@ class PythiaSimulationRunner:
                 logs.append(f"Downloading Pythia 8 from {PYTHIA_DOWNLOAD_URL}...")
                 try:
                     urllib.request.urlretrieve(PYTHIA_DOWNLOAD_URL, tarball_path)
-                except Exception as exc:
-                    raise PythiaSimError(f"Failed to download Pythia 8: {exc}")
+                except (URLError, OSError) as exc:
+                    raise PythiaSimError(f"Failed to download Pythia 8: {exc}") from exc
 
                 logs.append("Extracting tarball...")
                 try:
                     with tarfile.open(tarball_path, "r:gz") as tar:
                         tar.extractall(path=vendor_dir)
-                except Exception as exc:
-                    raise PythiaSimError(f"Failed to extract tarball: {exc}")
+                except (tarfile.TarError, OSError) as exc:
+                    raise PythiaSimError(f"Failed to extract tarball: {exc}") from exc
                 finally:
                     if tarball_path.exists():
                         tarball_path.unlink()
@@ -2830,7 +3284,7 @@ class PythiaSimulationRunner:
                 logs.append("Compilation successful.")
 
         registry_file = _candidate_registry_paths(
-            plugin_root=self.plugin_root, env=env, platform=platform_name
+            env=env, platform=platform_name
         )[0]
         registry_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2854,7 +3308,7 @@ class PythiaSimulationRunner:
             "logs": "\n".join(logs)
         }
 
-    def search_pythia_examples(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def search_pythia_examples(self, arguments: Mapping[str, object]) -> ExampleSearchPayload:
         root_alias = arguments.get("root_alias")
         if root_alias is not None and (not isinstance(root_alias, str) or not root_alias):
             raise PythiaSimError("root_alias must be a non-empty string when provided.")
@@ -2873,7 +3327,7 @@ class PythiaSimulationRunner:
         examples_dir = _resolve_examples_dir(root)
         unsupported_targets = _parse_unsupported_example_targets(examples_dir / "Makefile")
 
-        results: list[dict[str, Any]] = []
+        results: list[ExampleSearchResult] = []
         match_count = 0
         filtered_match_count = 0
         searched_file_count = 0
@@ -2904,7 +3358,7 @@ class PythiaSimulationRunner:
                     continue
 
                 line_number, snippet = match
-                result = {
+                result: ExampleSearchResult = {
                     "path": str(path),
                     "name": path.name,
                     "file_kind": path.suffix.lower().lstrip("."),
@@ -2940,12 +3394,12 @@ class PythiaSimulationRunner:
 
     def _run_event_record_capture(
         self, spec: EventRecordSimulationSpec, *, selector: ParticleSelector | None = None
-    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    ) -> tuple[AnalysisPayloadBase, EventRecordBundle | None]:
         source_cpp = _build_event_record_source(spec, selector=selector)
         supporting_files = validate_supporting_files(_supporting_files_for_event_record(spec))
         root = self._select_root(spec.root_alias)
         run_id = uuid.uuid4().hex
-        request_payload = {
+        request_payload: RequestPayload = {
             "run_id": run_id,
             "root_alias": root.alias,
             "commands": list(spec.commands),
@@ -2964,20 +3418,8 @@ class PythiaSimulationRunner:
         self._write_generated_artifact_header(run_dir)
         self._write_supporting_files(run_dir, supporting_files)
 
-        compile_result = {
-            "ok": False,
-            "exit_code": None,
-            "stdout": "",
-            "stderr": "",
-            "command_summary": "",
-        }
-        run_result = {
-            "ok": False,
-            "exit_code": None,
-            "stdout": "",
-            "stderr": "",
-            "timed_out": False,
-        }
+        compile_result = _empty_compile_result()
+        run_result = _empty_run_result()
         bootstrap_performed = False
 
         try:
@@ -2992,7 +3434,7 @@ class PythiaSimulationRunner:
             bootstrap_performed = lifecycle.bootstrap_performed
             compile_result = lifecycle.compile_result
             run_result = lifecycle.run_result
-            payload = {
+            payload: AnalysisPayloadBase = {
                 "run_id": run_id,
                 "root_alias": root.alias,
                 "bootstrap_performed": bootstrap_performed,
@@ -3025,19 +3467,18 @@ class PythiaSimulationRunner:
             return payload, _load_event_record_bundle(
                 run_id,
                 completed_root=self.completed_runs_root,
-                legacy_completed_root=self.legacy_completed_runs_root,
             )
         except PythiaSimError:
             raise
         except Exception as exc:  # pragma: no cover - defensive server-side fallback
-            compile_result = {
-                "ok": False,
-                "exit_code": compile_result.get("exit_code"),
-                "stdout": str(compile_result.get("stdout", "")),
-                "stderr": str(compile_result.get("stderr", ""))
+            compile_result = _build_compile_result(
+                ok=False,
+                exit_code=compile_result.get("exit_code"),
+                stdout=str(compile_result.get("stdout", "")),
+                stderr=str(compile_result.get("stderr", ""))
                 + _format_stage_output("internal error", str(exc)),
-                "command_summary": str(compile_result.get("command_summary", "")),
-            }
+                command_summary=str(compile_result.get("command_summary", "")),
+            )
             failure_dir = self._copy_failed_artifacts(
                 run_dir,
                 run_id=run_id,
@@ -3052,27 +3493,28 @@ class PythiaSimulationRunner:
                 failure_artifacts_path=str(failure_dir),
             ) from exc
 
-    def summarize_event_record(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def summarize_event_record(self, arguments: Mapping[str, object]) -> EventRecordAnalysisPayload:
         spec = validate_event_record_simulation_spec(arguments)
         payload, bundle = self._run_event_record_capture(spec)
         if bundle is None:
             payload["analysis_ok"] = False
             payload["message"] = "Generated event-record capture did not complete successfully."
             return payload
-        result = _event_record_summary_payload(bundle)
+        result: EventRecordAnalysisPayload = _event_record_summary_payload(bundle)
         result["analysis_ok"] = True
         return result
 
-    def trace_particle_lineage(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def trace_particle_lineage(self, arguments: Mapping[str, object]) -> TraceLineageAnalysis:
         selector = validate_particle_selector(arguments.get("particle_selector"))
         trace_options = validate_trace_options(arguments.get("trace_options"))
         run_id = arguments.get("run_id")
+        if run_id is not None and not isinstance(run_id, str):
+            raise PythiaSimError("run_id must be a string when provided.")
         used_existing_run = run_id is not None
         if used_existing_run:
             bundle = _load_event_record_bundle(
                 run_id,
                 completed_root=self.completed_runs_root,
-                legacy_completed_root=self.legacy_completed_runs_root,
             )
         else:
             spec = validate_event_record_simulation_spec(arguments)
@@ -3081,7 +3523,7 @@ class PythiaSimulationRunner:
                 payload["analysis_ok"] = False
                 payload["message"] = "Generated event-record capture did not complete successfully."
                 return payload
-        payload = _base_payload_from_bundle(bundle)
+        payload: TraceLineageAnalysis = _base_payload_from_bundle(bundle)
         payload["used_existing_run"] = used_existing_run
         try:
             event, particle, rank_offset = _select_particle_from_examples(bundle, selector)
@@ -3098,36 +3540,42 @@ class PythiaSimulationRunner:
             if path and _trace_stop_match(path[-1], trace_options.stop_at)
         ]
         payload["analysis_ok"] = True
+        selected_score = event.get("score")
+        selected_particle_pt = particle.get("pt")
+        selected_particle_energy = particle.get("energy")
+        selected_particle_eta = particle.get("eta")
+        selected_particle_charge = particle.get("charge")
         payload["selected_event"] = {
             "accepted_event_index": event.get("accepted_event_index"),
-            "score": event.get("score"),
+            "score": None if selected_score is None else float(selected_score),
         }
         payload["selected_particle"] = {
             "rank_index": rank_offset + 1,
             "index": particle.get("index"),
             "id": particle.get("id"),
             "status": particle.get("status"),
-            "pt": particle.get("pt"),
-            "energy": particle.get("energy"),
-            "eta": particle.get("eta"),
-            "charge": particle.get("charge"),
+            "pt": None if selected_particle_pt is None else float(selected_particle_pt),
+            "energy": None if selected_particle_energy is None else float(selected_particle_energy),
+            "eta": None if selected_particle_eta is None else float(selected_particle_eta),
+            "charge": None if selected_particle_charge is None else float(selected_particle_charge),
             "is_final": particle.get("is_final"),
         }
         payload["lineage_paths"] = lineage_paths
         payload["matched_stop_nodes"] = matched_stop_nodes
-        payload["trace_options"] = dataclasses.asdict(trace_options)
-        payload["particle_selector"] = dataclasses.asdict(selector)
+        payload["trace_options"] = cast(TraceOptionsPayload, dataclasses.asdict(trace_options))
+        payload["particle_selector"] = cast(ParticleSelectorPayload, dataclasses.asdict(selector))
         return payload
 
-    def find_decay_chain(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def find_decay_chain(self, arguments: Mapping[str, object]) -> DecayChainResult:
         chain_query = validate_decay_chain_query(arguments.get("decay_chain"))
         run_id = arguments.get("run_id")
+        if run_id is not None and not isinstance(run_id, str):
+            raise PythiaSimError("run_id must be a string when provided.")
         used_existing_run = run_id is not None
         if used_existing_run:
             bundle = _load_event_record_bundle(
                 run_id,
                 completed_root=self.completed_runs_root,
-                legacy_completed_root=self.legacy_completed_runs_root,
             )
         else:
             spec = validate_event_record_simulation_spec(arguments)
@@ -3136,7 +3584,7 @@ class PythiaSimulationRunner:
                 payload["analysis_ok"] = False
                 payload["message"] = "Generated event-record capture did not complete successfully."
                 return payload
-        payload = _base_payload_from_bundle(bundle)
+        payload: DecayChainResult = _base_payload_from_bundle(bundle)
         payload["used_existing_run"] = used_existing_run
         summary = bundle["summary"]
         examples = bundle["examples"]
@@ -3160,8 +3608,8 @@ class PythiaSimulationRunner:
             collapse_same_id_hops=match_semantics == "collapse_same_id_hops",
         )
         payload["analysis_ok"] = True
-        decay_chain_payload = {
-            "query": dataclasses.asdict(chain_query),
+        decay_chain_payload: DecayChainAnalysis = {
+            "query": cast(DecayChainQueryPayload, dataclasses.asdict(chain_query)),
             "chain_key": chain_key,
             "match_semantics": match_semantics,
             "summary_histogram_complete": summary_histogram_complete,
@@ -3169,7 +3617,7 @@ class PythiaSimulationRunner:
             "summary_match_count": summary_match_count,
             "example_snapshot_match_count": example_snapshot_match_count,
             "example_snapshot_match_event_count": example_snapshot_match_event_count,
-            "stored_example_event_count": examples.get("stored_event_count"),
+            "stored_example_event_count": cast(int | None, examples.get("stored_event_count")),
             "representative_matches": representative_matches,
         }
         if summary_match_count == example_snapshot_match_count:
@@ -3177,24 +3625,25 @@ class PythiaSimulationRunner:
         payload["decay_chain"] = decay_chain_payload
         return payload
 
-    def explain_status_codes(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def explain_status_codes(self, arguments: Mapping[str, object]) -> StatusCodeResult:
         run_id = arguments.get("run_id")
-        payload: dict[str, Any]
-        status_histogram: dict[str, Any] = {}
+        payload: StatusCodeResult
+        status_histogram: dict[str, object] = {}
+        if run_id is not None and not isinstance(run_id, str):
+            raise PythiaSimError("run_id must be a string when provided.")
         if run_id is not None:
             bundle = _load_event_record_bundle(
                 run_id,
                 completed_root=self.completed_runs_root,
-                legacy_completed_root=self.legacy_completed_runs_root,
             )
             payload = _base_payload_from_bundle(bundle)
             summary = bundle["summary"]
             histogram = summary.get("status_code_counts")
             if isinstance(histogram, dict):
-                status_histogram = histogram
+                status_histogram = cast(dict[str, object], histogram)
         else:
-            payload = {}
-        explanations = []
+            payload = {"analysis_ok": True}
+        explanations: list[StatusCodeExplanation] = []
         for code in _normalize_status_code_list(arguments.get("status_codes")):
             item = explain_status_code(code)
             observed_count = status_histogram.get(str(code))
@@ -3250,7 +3699,7 @@ class PythiaSimulationRunner:
         return layout
 
     def _select_root(self, root_alias: str | None) -> RootEntry:
-        registry = load_registry(self.registry_path, plugin_root=self.plugin_root)
+        registry = load_registry(self.registry_path)
         alias = root_alias or registry.default_alias
         try:
             return registry.roots[alias]
@@ -3312,11 +3761,11 @@ class PythiaSimulationRunner:
         run_dir: Path,
         *,
         run_id: str,
-        request_payload: dict[str, Any],
+        request_payload: RequestPayload,
         root: RootEntry,
         bootstrap_performed: bool,
-        compile_result: dict[str, Any],
-        run_result: dict[str, Any],
+        compile_result: CompileResult,
+        run_result: RunResult,
     ) -> Path:
         metadata = {
             "run_id": run_id,
@@ -3336,11 +3785,11 @@ class PythiaSimulationRunner:
         *,
         run_id: str,
         run_dir: Path,
-        request_payload: dict[str, Any],
+        request_payload: RequestPayload,
         root: RootEntry,
         bootstrap_performed: bool,
-        compile_result: dict[str, Any],
-        run_result: dict[str, Any],
+        compile_result: CompileResult,
+        run_result: RunResult,
     ) -> Path:
         summary = _load_json_file(run_dir / EVENT_RECORD_SUMMARY_ARTIFACT, label=EVENT_RECORD_SUMMARY_ARTIFACT)
         examples = _load_json_file(
@@ -3440,13 +3889,7 @@ class PythiaSimulationRunner:
         compile_exit_code: int | None = None
         bootstrap_performed = False
         executable_path: Path | None = None
-        run_result = {
-            "ok": False,
-            "exit_code": None,
-            "stdout": "",
-            "stderr": "",
-            "timed_out": False,
-        }
+        run_result = _empty_run_result()
 
         make_vars, bootstrap_performed, bootstrap_result = self._prepare_root(
             root, max_output_bytes=max_output_bytes
@@ -3456,13 +3899,13 @@ class PythiaSimulationRunner:
             compile_stdout += _format_stage_output("bootstrap stdout", bootstrap_result.stdout)
             compile_stderr += _format_stage_output("bootstrap stderr", bootstrap_result.stderr)
             compile_exit_code = bootstrap_result.exit_code
-            compile_result = {
-                "ok": False,
-                "exit_code": compile_exit_code,
-                "stdout": compile_stdout,
-                "stderr": compile_stderr,
-                "command_summary": " ; ".join(compile_command_summaries),
-            }
+            compile_result = _build_compile_result(
+                ok=False,
+                exit_code=compile_exit_code,
+                stdout=compile_stdout,
+                stderr=compile_stderr,
+                command_summary=" ; ".join(compile_command_summaries),
+            )
             return SimulationLifecycleResult(
                 bootstrap_performed=bootstrap_performed,
                 compile_result=compile_result,
@@ -3508,13 +3951,13 @@ class PythiaSimulationRunner:
                     compile_ok = True
                     executable_path = fallback_binary
 
-        compile_result = {
-            "ok": compile_ok,
-            "exit_code": compile_exit_code,
-            "stdout": compile_stdout,
-            "stderr": compile_stderr,
-            "command_summary": " ; ".join(compile_command_summaries),
-        }
+        compile_result = _build_compile_result(
+            ok=compile_ok,
+            exit_code=compile_exit_code,
+            stdout=compile_stdout,
+            stderr=compile_stderr,
+            command_summary=" ; ".join(compile_command_summaries),
+        )
 
         if not compile_ok or executable_path is None:
             return SimulationLifecycleResult(
@@ -3534,26 +3977,26 @@ class PythiaSimulationRunner:
             timeout_sec=run_timeout_sec,
             max_output_bytes=max_output_bytes,
         )
-        run_result = {
-            "ok": execution.exit_code == 0 and not execution.timed_out,
-            "exit_code": execution.exit_code,
-            "stdout": execution.stdout,
-            "stderr": execution.stderr,
-            "timed_out": execution.timed_out,
-        }
+        run_result = _build_run_result(
+            ok=execution.exit_code == 0 and not execution.timed_out,
+            exit_code=execution.exit_code,
+            stdout=execution.stdout,
+            stderr=execution.stderr,
+            timed_out=execution.timed_out,
+        )
         if run_result["ok"]:
             try:
                 run_result["stdout"] = normalize_terminal_outputs(execution.stdout)
             except PythiaSimError as exc:
-                run_result = {
-                    "ok": False,
-                    "exit_code": execution.exit_code,
-                    "stdout": execution.stdout,
-                    "stderr": execution.stderr
+                run_result = _build_run_result(
+                    ok=False,
+                    exit_code=execution.exit_code,
+                    stdout=execution.stdout,
+                    stderr=execution.stderr
                     + ("\n" if execution.stderr and not execution.stderr.endswith("\n") else "")
                     + f"[pythia-sim] {exc}\n",
-                    "timed_out": execution.timed_out,
-                }
+                    timed_out=execution.timed_out,
+                )
 
         return SimulationLifecycleResult(
             bootstrap_performed=bootstrap_performed,
@@ -3561,7 +4004,7 @@ class PythiaSimulationRunner:
             run_result=run_result,
         )
 
-    def run_pythia_simulation(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def run_pythia_simulation(self, arguments: Mapping[str, object]) -> FailureRunPayload:
         _reject_removed_artifact_cap(arguments)
         root_alias = arguments.get("root_alias")
         if root_alias is not None and (not isinstance(root_alias, str) or not root_alias):
@@ -3581,12 +4024,14 @@ class PythiaSimulationRunner:
         )
         max_output_bytes = _coerce_output_cap(arguments.get("max_output_bytes"))
         source_cpp = arguments.get("source_cpp")
+        if not isinstance(source_cpp, str):
+            raise PythiaSimError("source_cpp must be a non-empty string.")
         validate_source_cpp(source_cpp)
         supporting_files = validate_supporting_files(arguments.get("supporting_files"))
 
         root = self._select_root(root_alias)
         run_id = uuid.uuid4().hex
-        request_payload = {
+        request_payload: RequestPayload = {
             "run_id": run_id,
             "root_alias": root.alias,
             "compile_timeout_sec": compile_timeout_sec,
@@ -3601,20 +4046,8 @@ class PythiaSimulationRunner:
         self._write_generated_artifact_header(run_dir)
         self._write_supporting_files(run_dir, supporting_files)
 
-        compile_result = {
-            "ok": False,
-            "exit_code": None,
-            "stdout": "",
-            "stderr": "",
-            "command_summary": "",
-        }
-        run_result = {
-            "ok": False,
-            "exit_code": None,
-            "stdout": "",
-            "stderr": "",
-            "timed_out": False,
-        }
+        compile_result = _empty_compile_result()
+        run_result = _empty_run_result()
         bootstrap_performed = False
 
         try:
@@ -3639,7 +4072,7 @@ class PythiaSimulationRunner:
                     compile_result=compile_result,
                     run_result=run_result,
                 )
-                return {
+                result: FailureRunPayload = {
                     "run_id": run_id,
                     "root_alias": root.alias,
                     "bootstrap_performed": bootstrap_performed,
@@ -3647,26 +4080,28 @@ class PythiaSimulationRunner:
                     "run": run_result,
                     "failure_artifacts_path": str(failure_dir),
                 }
+                return result
 
             cleanup_success_run(run_dir)
-            return {
+            result = {
                 "run_id": run_id,
                 "root_alias": root.alias,
                 "bootstrap_performed": bootstrap_performed,
                 "compile": compile_result,
                 "run": run_result,
             }
+            return result
         except PythiaSimError:
             raise
         except Exception as exc:  # pragma: no cover - defensive server-side fallback
-            compile_result = {
-                "ok": False,
-                "exit_code": compile_result.get("exit_code"),
-                "stdout": str(compile_result.get("stdout", "")),
-                "stderr": str(compile_result.get("stderr", ""))
+            compile_result = _build_compile_result(
+                ok=False,
+                exit_code=compile_result.get("exit_code"),
+                stdout=str(compile_result.get("stdout", "")),
+                stderr=str(compile_result.get("stderr", ""))
                 + _format_stage_output("internal error", str(exc)),
-                "command_summary": str(compile_result.get("command_summary", "")),
-            }
+                command_summary=str(compile_result.get("command_summary", "")),
+            )
             failure_dir = self._copy_failed_artifacts(
                 run_dir,
                 run_id=run_id,
@@ -3682,324 +4117,99 @@ class PythiaSimulationRunner:
             ) from exc
 
 
-LIST_ROOTS_TOOL: dict[str, Any] = {
+LIST_ROOTS_TOOL: dict[str, object] = {
     "name": "list_pythia_roots",
     "description": "List configured standalone Pythia roots, their readiness, compiler, and whether execution is available.",
-    "inputSchema": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
+    "inputSchema": _tool_schema({}),
 }
 
-BOOTSTRAP_PYTHIA_TOOL: dict[str, Any] = {
+BOOTSTRAP_PYTHIA_TOOL: dict[str, object] = {
     "name": "bootstrap_pythia",
-    "description": "Automatically download, compile, and configure a standalone Pythia 8 installation for the local user. Call this tool when the simulation tools complain that Pythia 8 is not installed or configured.",
-    "inputSchema": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
+    "description": "Download, compile, and register a standalone Pythia 8 installation.",
+    "inputSchema": _tool_schema({}),
 }
 
-SEARCH_EXAMPLES_TOOL: dict[str, Any] = {
+SEARCH_EXAMPLES_TOOL: dict[str, object] = {
     "name": "search_pythia_examples",
-    "description": "Search the configured Pythia examples directory for standalone reference code and .cmnd files.",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "Text query used to find relevant .cc or .cmnd example snippets.",
-            },
-            "root_alias": {
-                "type": "string",
-                "description": "Configured Pythia root alias. Defaults to the registry default_alias.",
-            },
-            "max_results": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_EXAMPLE_SEARCH_RESULTS,
-            },
-            "include_cmnd": {
-                "type": "boolean",
-                "description": "Whether .cmnd companion files should be included in the search.",
-            },
-            "safety_mode": {
-                "type": "string",
-                "enum": [
-                    EXAMPLE_SAFETY_MODE_STANDALONE_ONLY,
-                    EXAMPLE_SAFETY_MODE_ALL,
-                ],
-                "description": "Use standalone_only to exclude examples that rely on unsupported external integrations.",
-            },
+    "description": "Search the configured Pythia examples directory for `.cc` and `.cmnd` files.",
+    "inputSchema": _tool_schema(
+        {
+            "query": _string_property(
+                description="Text query used to find relevant .cc or .cmnd example snippets.",
+            ),
+            "root_alias": _root_alias_property(),
+            "max_results": _integer_property(minimum=1, maximum=MAX_EXAMPLE_SEARCH_RESULTS),
+            "include_cmnd": _boolean_property(
+                description="Whether .cmnd companion files should be included in the search.",
+            ),
+            "safety_mode": _string_property(
+                enum=[EXAMPLE_SAFETY_MODE_STANDALONE_ONLY, EXAMPLE_SAFETY_MODE_ALL],
+                description="Use standalone_only to exclude examples that rely on unsupported external integrations.",
+            ),
         },
-        "required": ["query"],
-        "additionalProperties": False,
-    },
+        required=["query"],
+    ),
 }
 
-SUMMARIZE_EVENT_RECORD_TOOL: dict[str, Any] = {
+SUMMARIZE_EVENT_RECORD_TOOL: dict[str, object] = {
     "name": "summarize_event_record",
-    "description": "Run a bounded declarative standalone Pythia simulation and persist private event-record snapshots for later introspection.",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "root_alias": {
-                "type": "string",
-                "description": "Configured Pythia root alias. Defaults to the registry default_alias.",
-            },
-            "commands": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Pythia readString commands to apply before init().",
-            },
-            "cmnd_text": {
-                "type": "string",
-                "description": "Optional raw .cmnd file text to load as settings.cmnd before init().",
-            },
-            "event_count": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_INTROSPECTION_EVENT_COUNT,
-            },
-            "random_seed": {"type": "integer", "minimum": 1},
-            "example_event_limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_INTROSPECTION_EXAMPLE_EVENTS,
-            },
-            "compile_timeout_sec": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_COMPILE_TIMEOUT_SEC,
-            },
-            "run_timeout_sec": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_RUN_TIMEOUT_SEC,
-            },
-            "max_output_bytes": {
-                "type": "integer",
-                "minimum": MIN_OUTPUT_BYTES,
-                "maximum": MAX_OUTPUT_BYTES,
-            },
-        },
-        "additionalProperties": False,
-    },
+    "description": "Run a bounded standalone Pythia simulation and persist private event-record snapshots.",
+    "inputSchema": _tool_schema(_introspection_request_properties()),
 }
 
-TRACE_PARTICLE_LINEAGE_TOOL: dict[str, Any] = {
+TRACE_PARTICLE_LINEAGE_TOOL: dict[str, object] = {
     "name": "trace_particle_lineage",
-    "description": "Trace a selected particle through stored or freshly generated event-record snapshots using structured particle selectors and ancestry options.",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "run_id": {
-                "type": "string",
-                "description": "Reuse a previously captured event-record run instead of rerunning the simulation.",
-            },
-            "root_alias": {"type": "string"},
-            "commands": {"type": "array", "items": {"type": "string"}},
-            "cmnd_text": {"type": "string"},
-            "event_count": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_INTROSPECTION_EVENT_COUNT,
-            },
-            "random_seed": {"type": "integer", "minimum": 1},
-            "example_event_limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_INTROSPECTION_EXAMPLE_EVENTS,
-            },
-            "compile_timeout_sec": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_COMPILE_TIMEOUT_SEC,
-            },
-            "run_timeout_sec": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_RUN_TIMEOUT_SEC,
-            },
-            "max_output_bytes": {
-                "type": "integer",
-                "minimum": MIN_OUTPUT_BYTES,
-                "maximum": MAX_OUTPUT_BYTES,
-            },
-            "particle_selector": {
-                "type": "object",
-                "properties": {
-                    "pdg_id": {"type": "integer"},
-                    "final_state": {"type": "boolean"},
-                    "charge": {"type": "integer", "enum": [-1, 0, 1]},
-                    "status_codes": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                    },
-                    "rank_by": {
-                        "type": "string",
-                        "enum": [TRACE_RANK_BY_PT, TRACE_RANK_BY_ENERGY, TRACE_RANK_BY_ETA_ABS],
-                    },
-                    "rank": {"type": "integer", "minimum": 1},
-                },
-                "additionalProperties": False,
-            },
-            "trace_options": {
-                "type": "object",
-                "properties": {
-                    "direction": {
-                        "type": "string",
-                        "enum": [TRACE_DIRECTION_ANCESTORS, TRACE_DIRECTION_DESCENDANTS],
-                    },
-                    "stop_at": {
-                        "oneOf": [
-                            {
-                                "type": "string",
-                                "enum": [
-                                    TRACE_STOP_AT_HARD_PROCESS_BOSON,
-                                    TRACE_STOP_AT_INCOMING_PARTONS,
-                                    TRACE_STOP_AT_BEAM,
-                                ],
-                            },
-                            {
-                                "type": "array",
-                                "items": {"type": "integer"},
-                            },
-                        ]
-                    },
-                    "max_depth": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": MAX_TRACE_DEPTH,
-                    },
-                },
-                "additionalProperties": False,
-            },
-        },
-        "additionalProperties": False,
-    },
+    "description": "Trace a selected particle through stored or newly generated event-record snapshots.",
+    "inputSchema": _tool_schema(
+        {
+            **_introspection_request_properties(include_run_id=True),
+            "particle_selector": _particle_selector_property(),
+            "trace_options": _trace_options_property(),
+        }
+    ),
 }
 
-FIND_DECAY_CHAIN_TOOL: dict[str, Any] = {
+FIND_DECAY_CHAIN_TOOL: dict[str, object] = {
     "name": "find_decay_chain",
-    "description": "Count and sample stored or freshly generated decay-chain occurrences using a structured parent/intermediate/child query.",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "run_id": {"type": "string"},
-            "root_alias": {"type": "string"},
-            "commands": {"type": "array", "items": {"type": "string"}},
-            "cmnd_text": {"type": "string"},
-            "event_count": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_INTROSPECTION_EVENT_COUNT,
-            },
-            "random_seed": {"type": "integer", "minimum": 1},
-            "example_event_limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_INTROSPECTION_EXAMPLE_EVENTS,
-            },
-            "compile_timeout_sec": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_COMPILE_TIMEOUT_SEC,
-            },
-            "run_timeout_sec": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_RUN_TIMEOUT_SEC,
-            },
-            "max_output_bytes": {
-                "type": "integer",
-                "minimum": MIN_OUTPUT_BYTES,
-                "maximum": MAX_OUTPUT_BYTES,
-            },
-            "decay_chain": {
-                "type": "object",
-                "properties": {
-                    "parent_pdg_id": {"type": "integer"},
-                    "child_pdg_id": {"type": "integer"},
-                    "intermediate_pdg_ids": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                    },
-                },
-                "required": ["parent_pdg_id", "child_pdg_id"],
-                "additionalProperties": False,
-            },
+    "description": "Count and sample stored or newly generated decay-chain matches.",
+    "inputSchema": _tool_schema(
+        {
+            **_introspection_request_properties(include_run_id=True),
+            "decay_chain": _decay_chain_property(),
         },
-        "required": ["decay_chain"],
-        "additionalProperties": False,
-    },
+        required=["decay_chain"],
+    ),
 }
 
-EXPLAIN_STATUS_CODES_TOOL: dict[str, Any] = {
+EXPLAIN_STATUS_CODES_TOOL: dict[str, object] = {
     "name": "explain_status_codes",
-    "description": "Explain curated Pythia status-code meanings, with optional observed counts from a previously captured event-record run.",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "status_codes": {
-                "type": "array",
-                "items": {"type": "integer"},
-                "minItems": 1,
-                "maxItems": MAX_STATUS_CODES_QUERY,
-            },
-            "run_id": {"type": "string"},
+    "description": "Explain Pythia status codes, with optional observed counts from a captured run.",
+    "inputSchema": _tool_schema(
+        {
+            "status_codes": _array_property(
+                {"type": "integer"}, min_items=1, max_items=MAX_STATUS_CODES_QUERY
+            ),
+            "run_id": _string_property(),
         },
-        "required": ["status_codes"],
-        "additionalProperties": False,
-    },
+        required=["status_codes"],
+    ),
 }
 
-RUN_SIMULATION_TOOL: dict[str, Any] = {
+RUN_SIMULATION_TOOL: dict[str, object] = {
     "name": "run_pythia_simulation",
-    "description": "Compile and run raw standalone Pythia C++ in an isolated directory, with auto-build for configured standalone roots when needed.",
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "root_alias": {
-                "type": "string",
-                "description": "Configured Pythia root alias. Defaults to the registry default_alias.",
-            },
-            "source_cpp": {
-                "type": "string",
-                "description": "Raw standalone C++ source that uses only standalone Pythia and safe standard library headers.",
-            },
-            "supporting_files": {
-                "type": "array",
-                "description": "Optional text companion files such as .cmnd files.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "content": {"type": "string"},
-                    },
-                    "required": ["name", "content"],
-                    "additionalProperties": False,
-                },
-            },
-            "compile_timeout_sec": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_COMPILE_TIMEOUT_SEC,
-            },
-            "run_timeout_sec": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_RUN_TIMEOUT_SEC,
-            },
-            "max_output_bytes": {
-                "type": "integer",
-                "minimum": MIN_OUTPUT_BYTES,
-                "maximum": MAX_OUTPUT_BYTES,
-            },
+    "description": "Compile and run standalone Pythia C++ in an isolated directory.",
+    "inputSchema": _tool_schema(
+        {
+            "root_alias": _root_alias_property(),
+            "source_cpp": _string_property(
+                description="Raw standalone C++ source that uses only standalone Pythia and safe standard library headers.",
+            ),
+            "supporting_files": _array_property(
+                _supporting_file_property(),
+                description="Optional text companion files such as .cmnd files.",
+            ),
+            **_runtime_timeout_properties(),
         },
-        "required": ["source_cpp"],
-        "additionalProperties": False,
-    },
+        required=["source_cpp"],
+    ),
 }

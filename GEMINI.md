@@ -1,15 +1,14 @@
 # Pythia Sim
 
-Use this extension when the user wants to run or inspect a standalone Pythia 8 simulation through MCP.
+Use this extension to run or inspect standalone Pythia 8 simulations through MCP.
 
-Prefer the bundled MCP tools over ad hoc shell commands when the task is pure standalone Pythia without external HEP integrations.
+Prefer the bundled MCP tools over ad hoc shell commands when the task is pure standalone Pythia.
 
-This extension is text-only for user-visible output.
-
+- user-visible output is text only
 - helper output is rendered as deterministic terminal text blocks
 - histograms are ASCII, not SVG
 - the MCP server does not expose resources or public artifacts
-- event-record follow-up uses private internal snapshots keyed by `run_id`
+- event-record follow-up uses private snapshots keyed by `run_id`
 
 ## Use It For
 
@@ -28,9 +27,9 @@ This extension is text-only for user-visible output.
 
 ## Workflow
 
-1. On a clean machine or first-use install, call `bootstrap_pythia` directly so the plugin can install and persist its managed standalone Pythia root without spending time probing the host for one.
-2. Otherwise use `list_pythia_roots` to confirm which checkout is configured or auto-detected and ready.
-3. Use `search_pythia_examples` when example `.cc` or `.cmnd` context would help.
+1. Use `bootstrap_pythia` on a clean machine or first-use install.
+2. Otherwise use `list_pythia_roots` to confirm which checkout is configured or auto-detected.
+3. Use `search_pythia_examples` when `.cc` or `.cmnd` context would help.
 4. Use `run_pythia_simulation` for raw standalone C++ execution.
 5. Use `summarize_event_record`, `trace_particle_lineage`, `find_decay_chain`, and `explain_status_codes` for structured event-record analysis.
 6. Treat tool text output as the primary reasoning signal.

@@ -4,18 +4,16 @@ import json
 import os
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 
 import pytest
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS_ROOT = PLUGIN_ROOT / "scripts"
-if str(SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_ROOT))
-
 import pythia_sim_core as core
 import pythia_sim_server as server
+SCRIPTS_ROOT = PLUGIN_ROOT / "scripts"
 
 
 def _make_fake_root(tmp_path: Path, name: str = "pythia") -> Path:
@@ -74,6 +72,22 @@ def _write_registry(tmp_path: Path, root_path: Path) -> Path:
     return registry_path
 
 
+def _write_plugin_registry(plugin_root: Path, root_path: Path, *, alias: str = "local") -> Path:
+    (plugin_root / "config").mkdir(parents=True, exist_ok=True)
+    registry_path = plugin_root / "config" / "roots.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "default_alias": alias,
+                "roots": [{"alias": alias, "path": str(root_path)}],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return registry_path
+
+
 def _write_fake_cxx(path: Path, *, executable_body: str) -> None:
     payload = f"""#!/bin/sh
 set -eu
@@ -112,6 +126,46 @@ def _make_runner(tmp_path: Path) -> core.PythiaSimulationRunner:
     )
 
 
+def _start_server_process(tmp_path: Path, registry_path: Path) -> subprocess.Popen[str]:
+    env = os.environ.copy()
+    env.update(
+        {
+            core.PYTHIA_SIM_REGISTRY_PATH_ENV: str(registry_path),
+            core.PYTHIA_SIM_STATE_DIR_ENV: str(tmp_path / "state"),
+        }
+    )
+    return subprocess.Popen(
+        [sys.executable, str(SCRIPTS_ROOT / "pythia_sim_server.py")],
+        cwd=PLUGIN_ROOT,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+
+
+def _initialize_server_process(process: subprocess.Popen[str]) -> dict[str, object]:
+    assert process.stdin is not None
+    assert process.stdout is not None
+    process.stdin.write(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-03-26"},
+            }
+        )
+        + "\n"
+    )
+    process.stdin.flush()
+    initialize_result = json.loads(process.stdout.readline())
+    process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+    process.stdin.flush()
+    return initialize_result
+
+
 def _terminal_output_block(name: str, kind: str, text: str) -> str:
     return (
         f"{core.TERMINAL_OUTPUT_BEGIN_PREFIX}name={name} kind={kind}>>\n"
@@ -122,15 +176,14 @@ def _terminal_output_block(name: str, kind: str, text: str) -> str:
 
 
 def _write_event_record_bundle(
-    plugin_root: Path,
+    completed_root: Path,
     run_id: str = "trace123",
     *,
     decay_chain_counts: dict[str, int] | None = None,
     exact_decay_chain_counts: dict[str, int] | None = None,
     events: list[dict[str, object]] | None = None,
-    legacy_format: bool = False,
 ) -> Path:
-    completed_dir = plugin_root / ".runs" / "completed" / run_id
+    completed_dir = completed_root / run_id
     completed_dir.mkdir(parents=True, exist_ok=True)
     default_decay_chain_counts = {"23>13": 4, "23>-13": 4}
     collapsed_counts = (
@@ -216,7 +269,7 @@ def _write_event_record_bundle(
         }
     ]
     summary = {
-        "version": 1 if legacy_format else 2,
+        "version": 2,
         "requested_event_count": 10,
         "accepted_event_count": 8,
         "failed_event_count": 2,
@@ -224,21 +277,18 @@ def _write_event_record_bundle(
         "final_state_pdg_counts": {"13": 4, "-13": 4},
         "status_code_counts": {"-23": 1, "-21": 2, "1": 2},
         "final_state_multiplicity_counts": {"2": 4},
-        "decay_chain_counts": collapsed_counts,
-    }
-    if not legacy_format:
-        summary["decay_chain_counts_complete"] = True
-        summary["collapsed_decay_chain_counts"] = collapsed_counts
-        summary["exact_decay_chain_counts"] = (
+        "decay_chain_counts_complete": True,
+        "collapsed_decay_chain_counts": collapsed_counts,
+        "exact_decay_chain_counts": (
             collapsed_counts if exact_decay_chain_counts is None else exact_decay_chain_counts
-        )
+        ),
+    }
     examples = {
-        "version": 1 if legacy_format else 2,
+        "version": 2,
         "stored_event_count": 1 if events is None else len(events),
         "events": default_events if events is None else events,
     }
-    if not legacy_format:
-        examples["sampling_strategy"] = "reservoir_full_events"
+    examples["sampling_strategy"] = "reservoir_full_events"
     metadata = {
         "run_id": run_id,
         "root_alias": "local",
@@ -308,33 +358,6 @@ def test_load_registry_prefers_explicit_registry_path_env_over_root_env(tmp_path
 
     assert registry.default_alias == "local"
     assert registry.roots["local"].path == root.resolve()
-
-
-def test_load_registry_falls_back_to_legacy_repo_config_when_xdg_file_missing(tmp_path: Path) -> None:
-    root = _make_fake_root(tmp_path / "legacy-root")
-    plugin_root = tmp_path / "plugin"
-    (plugin_root / "config").mkdir(parents=True)
-    registry_path = plugin_root / "config" / "roots.json"
-    registry_path.write_text(
-        json.dumps(
-            {
-                "default_alias": "legacy",
-                "roots": [{"alias": "legacy", "path": str(root)}],
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    registry = core.load_registry(
-        None,
-        plugin_root=plugin_root,
-        env={"XDG_CONFIG_HOME": str(tmp_path / "xdg-config")},
-        platform="linux",
-    )
-
-    assert registry.default_alias == "legacy"
-    assert registry.roots["legacy"].path == root.resolve()
 
 
 def test_load_registry_uses_macos_fallback_after_missing_xdg_path(
@@ -457,6 +480,15 @@ def test_parse_makefile_inc_extracts_required_fields(tmp_path: Path) -> None:
     assert parsed["PREFIX_INCLUDE"] == str(root / "include")
     assert parsed["PREFIX_LIB"] == str(root / "lib")
     assert "-std=c++11" in parsed["CXX_COMMON"]
+
+
+def test_list_roots_surfaces_invalid_makefile_inc(tmp_path: Path) -> None:
+    runner = _make_runner(tmp_path)
+    root = core.load_registry(runner.registry_path).roots["local"].path
+    (root / "Makefile.inc").write_text("CXX = g++\n", encoding="utf-8")
+
+    with pytest.raises(core.PythiaSimError, match="missing required fields"):
+        runner.list_pythia_roots()
 
 
 def test_validate_source_rejects_unsafe_calls() -> None:
@@ -626,7 +658,7 @@ def test_bootstrap_pythia_skips_autodetect_on_first_install(
     )
 
     def fake_download(url: str, destination: Path) -> None:
-        Path(destination).write_text("stub tarball\n", encoding="utf-8")
+        Path(destination).write_text("mock tarball\n", encoding="utf-8")
 
     class FakeTarball:
         def __enter__(self) -> "FakeTarball":
@@ -656,6 +688,34 @@ def test_bootstrap_pythia_skips_autodetect_on_first_install(
     registry = core.load_registry(Path(payload["registry_path"]))
     assert registry.default_alias == core.PYTHIA_AUTO_ALIAS
     assert registry.roots[core.PYTHIA_AUTO_ALIAS].path == managed_root
+
+
+def test_bootstrap_pythia_wraps_download_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    state_root = tmp_path / "state"
+    runner = core.PythiaSimulationRunner(
+        plugin_root=plugin_root,
+        registry_path=None,
+        state_root=state_root,
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setattr(core.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(
+        core,
+        "autodetect_pythia_root",
+        lambda env=None: None,
+    )
+    monkeypatch.setattr(
+        core.urllib.request,
+        "urlretrieve",
+        lambda *args, **kwargs: (_ for _ in ()).throw(urllib.error.URLError("offline")),
+    )
+
+    with pytest.raises(core.PythiaSimError, match="Failed to download Pythia 8"):
+        runner.bootstrap_pythia({})
 
 
 def test_bootstrap_pythia_prefers_detected_install_when_root_is_already_configured(
@@ -964,7 +1024,7 @@ def test_event_record_spec_rejects_known_invalid_silencing_settings() -> None:
 
 def test_trace_particle_lineage_reuses_completed_run(tmp_path: Path) -> None:
     runner = _make_runner(tmp_path)
-    _write_event_record_bundle(runner.plugin_root, run_id="trace123")
+    _write_event_record_bundle(runner.completed_runs_root, run_id="trace123")
 
     payload = runner.trace_particle_lineage(
         {
@@ -983,7 +1043,7 @@ def test_trace_particle_lineage_reuses_completed_run(tmp_path: Path) -> None:
 
 def test_find_decay_chain_reuses_summary_and_examples(tmp_path: Path) -> None:
     runner = _make_runner(tmp_path)
-    _write_event_record_bundle(runner.plugin_root, run_id="trace123")
+    _write_event_record_bundle(runner.completed_runs_root, run_id="trace123")
 
     payload = runner.find_decay_chain(
         {
@@ -1010,7 +1070,7 @@ def test_find_decay_chain_reports_snapshot_mismatch_without_ambiguous_match_coun
 ) -> None:
     runner = _make_runner(tmp_path)
     _write_event_record_bundle(
-        runner.plugin_root,
+        runner.completed_runs_root,
         run_id="trace123",
         decay_chain_counts={"23>-13": 4},
     )
@@ -1033,7 +1093,7 @@ def test_find_decay_chain_reports_snapshot_mismatch_without_ambiguous_match_coun
 def test_find_decay_chain_collapses_identity_preserving_hops(tmp_path: Path) -> None:
     runner = _make_runner(tmp_path)
     _write_event_record_bundle(
-        runner.plugin_root,
+        runner.completed_runs_root,
         run_id="higgs123",
         decay_chain_counts={"25>22": 2, "25>25": 1, "25>25>22": 1},
         exact_decay_chain_counts={"25>22": 1, "25>25": 1, "25>25>22": 1},
@@ -1150,7 +1210,7 @@ def test_find_decay_chain_collapses_identity_preserving_hops(tmp_path: Path) -> 
 def test_find_decay_chain_keeps_explicit_duplicate_queries_meaningful(tmp_path: Path) -> None:
     runner = _make_runner(tmp_path)
     _write_event_record_bundle(
-        runner.plugin_root,
+        runner.completed_runs_root,
         run_id="higgs123",
         decay_chain_counts={"25>22": 2, "25>25": 1, "25>25>22": 1},
         exact_decay_chain_counts={"25>22": 1, "25>25": 1, "25>25>22": 1},
@@ -1226,7 +1286,7 @@ def test_find_decay_chain_uses_complete_histogram_without_pruning(tmp_path: Path
     query_parent = 1299
     query_child = 2299
     _write_event_record_bundle(
-        runner.plugin_root,
+        runner.completed_runs_root,
         run_id="hist123",
         decay_chain_counts=histogram,
         exact_decay_chain_counts=histogram,
@@ -1250,7 +1310,7 @@ def test_trace_particle_lineage_can_select_non_top_ranked_particle_from_full_eve
 ) -> None:
     runner = _make_runner(tmp_path)
     _write_event_record_bundle(
-        runner.plugin_root,
+        runner.completed_runs_root,
         run_id="lineage123",
         events=[
             {
@@ -1352,7 +1412,7 @@ def test_find_decay_chain_scans_full_event_examples_outside_selected_neighborhoo
 ) -> None:
     runner = _make_runner(tmp_path)
     _write_event_record_bundle(
-        runner.plugin_root,
+        runner.completed_runs_root,
         run_id="fullscan123",
         decay_chain_counts={"25>5": 1},
         exact_decay_chain_counts={"25>5": 1},
@@ -1436,30 +1496,9 @@ def test_find_decay_chain_scans_full_event_examples_outside_selected_neighborhoo
     assert payload["decay_chain"]["representative_matches"]
 
 
-def test_find_decay_chain_legacy_snapshots_keep_legacy_semantics(tmp_path: Path) -> None:
-    runner = _make_runner(tmp_path)
-    _write_event_record_bundle(
-        runner.plugin_root,
-        run_id="legacy123",
-        legacy_format=True,
-    )
-
-    payload = runner.find_decay_chain(
-        {
-            "run_id": "legacy123",
-            "decay_chain": {"parent_pdg_id": 23, "child_pdg_id": 13},
-        }
-    )
-
-    assert payload["analysis_ok"] is True
-    assert payload["decay_chain"]["match_semantics"] == "exact_immediate_legacy"
-    assert payload["decay_chain"]["summary_histogram_complete"] is False
-    assert payload["decay_chain"]["summary_count_source"] == "legacy_decay_chain_counts"
-
-
 def test_explain_status_codes_annotates_observed_counts(tmp_path: Path) -> None:
     runner = _make_runner(tmp_path)
-    _write_event_record_bundle(runner.plugin_root, run_id="trace123")
+    _write_event_record_bundle(runner.completed_runs_root, run_id="trace123")
 
     payload = runner.explain_status_codes({"run_id": "trace123", "status_codes": [1, -23, 41]})
 
@@ -1475,7 +1514,7 @@ def test_summarize_event_record_uses_generated_capture_payload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runner = _make_runner(tmp_path)
-    _write_event_record_bundle(runner.plugin_root, run_id="generated123")
+    _write_event_record_bundle(runner.completed_runs_root, run_id="generated123")
     captured: dict[str, object] = {}
 
     def fake_execute(
@@ -1491,13 +1530,13 @@ def test_summarize_event_record_uses_generated_capture_payload(
         captured["source_cpp"] = source_path.read_text(encoding="utf-8")
         captured["supporting_files"] = sorted(path.name for path in run_dir.iterdir() if path.name != "source.cpp")
         (run_dir / core.EVENT_RECORD_SUMMARY_ARTIFACT).write_text(
-            (runner.legacy_completed_runs_root / "generated123" / core.EVENT_RECORD_SUMMARY_ARTIFACT).read_text(
+            (runner.completed_runs_root / "generated123" / core.EVENT_RECORD_SUMMARY_ARTIFACT).read_text(
                 encoding="utf-8"
             ),
             encoding="utf-8",
         )
         (run_dir / core.EVENT_RECORD_EXAMPLES_ARTIFACT).write_text(
-            (runner.legacy_completed_runs_root / "generated123" / core.EVENT_RECORD_EXAMPLES_ARTIFACT).read_text(
+            (runner.completed_runs_root / "generated123" / core.EVENT_RECORD_EXAMPLES_ARTIFACT).read_text(
                 encoding="utf-8"
             ),
             encoding="utf-8",
@@ -1551,12 +1590,11 @@ def test_summarize_event_record_uses_generated_capture_payload(
 
 def test_server_analysis_summaries_include_representative_details(tmp_path: Path) -> None:
     runner = _make_runner(tmp_path)
-    _write_event_record_bundle(runner.plugin_root, run_id="trace123")
+    _write_event_record_bundle(runner.completed_runs_root, run_id="trace123")
 
     bundle = core._load_event_record_bundle(
         "trace123",
         completed_root=runner.completed_runs_root,
-        legacy_completed_root=runner.legacy_completed_runs_root,
     )
     event_record_payload = core._event_record_summary_payload(bundle)
     event_record_payload["analysis_ok"] = True
@@ -1695,43 +1733,12 @@ def test_server_stdio_mcp_smoke_test(tmp_path: Path) -> None:
     root = _make_fake_root(tmp_path)
     _write_makefile_inc(root)
     registry_path = _write_registry(tmp_path, root)
-    env = os.environ.copy()
-    env.update(
-        {
-            core.PYTHIA_SIM_REGISTRY_PATH_ENV: str(registry_path),
-            core.PYTHIA_SIM_STATE_DIR_ENV: str(tmp_path / "state"),
-        }
-    )
-
-    process = subprocess.Popen(
-        [sys.executable, str(SCRIPTS_ROOT / "pythia_sim_server.py")],
-        cwd=PLUGIN_ROOT,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-    )
-    assert process.stdin is not None
-    assert process.stdout is not None
+    process = _start_server_process(tmp_path, registry_path)
     try:
-        process.stdin.write(
-            json.dumps(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {"protocolVersion": "2025-03-26"},
-                }
-            )
-            + "\n"
-        )
-        process.stdin.flush()
-        initialize_result = json.loads(process.stdout.readline())
+        initialize_result = _initialize_server_process(process)
         assert initialize_result["result"]["serverInfo"]["name"] == server.SERVER_NAME
         assert "resources" not in initialize_result["result"]["capabilities"]
 
-        process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
         process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}) + "\n")
         process.stdin.flush()
         tool_list = json.loads(process.stdout.readline())
@@ -1763,42 +1770,11 @@ def test_server_stdio_rejects_resources_read(tmp_path: Path) -> None:
     root = _make_fake_root(tmp_path)
     _write_makefile_inc(root)
     registry_path = _write_registry(tmp_path, root)
-    env = os.environ.copy()
-    env.update(
-        {
-            core.PYTHIA_SIM_REGISTRY_PATH_ENV: str(registry_path),
-            core.PYTHIA_SIM_STATE_DIR_ENV: str(tmp_path / "state"),
-        }
-    )
-
-    process = subprocess.Popen(
-        [sys.executable, str(SCRIPTS_ROOT / "pythia_sim_server.py")],
-        cwd=PLUGIN_ROOT,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-    )
-    assert process.stdin is not None
-    assert process.stdout is not None
+    process = _start_server_process(tmp_path, registry_path)
     try:
-        process.stdin.write(
-            json.dumps(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {"protocolVersion": "2025-03-26"},
-                }
-            )
-            + "\n"
-        )
-        process.stdin.flush()
-        initialize_result = json.loads(process.stdout.readline())
+        initialize_result = _initialize_server_process(process)
         assert initialize_result["result"]["serverInfo"]["name"] == server.SERVER_NAME
 
-        process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
         process.stdin.write(
             json.dumps(
                 {
@@ -1835,41 +1811,9 @@ def test_server_stdio_run_returns_text_only_content(tmp_path: Path) -> None:
     _write_fake_cxx(fake_cxx, executable_body=executable_body)
     _write_makefile_inc(root, compiler=str(fake_cxx))
     registry_path = _write_registry(tmp_path, root)
-    env = os.environ.copy()
-    env.update(
-        {
-            core.PYTHIA_SIM_REGISTRY_PATH_ENV: str(registry_path),
-            core.PYTHIA_SIM_STATE_DIR_ENV: str(tmp_path / "state"),
-        }
-    )
-
-    process = subprocess.Popen(
-        [sys.executable, str(SCRIPTS_ROOT / "pythia_sim_server.py")],
-        cwd=PLUGIN_ROOT,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-    )
-    assert process.stdin is not None
-    assert process.stdout is not None
+    process = _start_server_process(tmp_path, registry_path)
     try:
-        process.stdin.write(
-            json.dumps(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {"protocolVersion": "2025-03-26"},
-                }
-            )
-            + "\n"
-        )
-        process.stdin.flush()
-        _ = json.loads(process.stdout.readline())
-
-        process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        _ = _initialize_server_process(process)
         process.stdin.write(
             json.dumps(
                 {
@@ -1907,18 +1851,7 @@ def test_integration_run_local_root(tmp_path: Path) -> None:
         pytest.skip("No local Pythia test root available.")
 
     plugin_root = tmp_path / "plugin"
-    (plugin_root / "config").mkdir(parents=True)
-    registry_path = plugin_root / "config" / "roots.json"
-    registry_path.write_text(
-        json.dumps(
-            {
-                "default_alias": "local",
-                "roots": [{"alias": "local", "path": str(integration_root)}],
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    registry_path = _write_registry(tmp_path, integration_root)
     runner = core.PythiaSimulationRunner(
         plugin_root=plugin_root, registry_path=registry_path, state_root=tmp_path / "state"
     )
@@ -1985,18 +1918,7 @@ def test_integration_summarize_event_record(tmp_path: Path) -> None:
         pytest.skip("No local Pythia test root available.")
 
     plugin_root = tmp_path / "plugin"
-    (plugin_root / "config").mkdir(parents=True)
-    registry_path = plugin_root / "config" / "roots.json"
-    registry_path.write_text(
-        json.dumps(
-            {
-                "default_alias": "local",
-                "roots": [{"alias": "local", "path": str(integration_root)}],
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    registry_path = _write_registry(tmp_path, integration_root)
     runner = core.PythiaSimulationRunner(
         plugin_root=plugin_root, registry_path=registry_path, state_root=tmp_path / "state"
     )

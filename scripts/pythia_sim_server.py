@@ -3,37 +3,48 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any
+from typing import Mapping, cast
 
 from pythia_sim_core import (
+    AnalysisPayloadBase,
     BOOTSTRAP_PYTHIA_TOOL,
+    BootstrapPayload,
+    CountEntry,
     EXPLAIN_STATUS_CODES_TOOL,
     FIND_DECAY_CHAIN_TOOL,
+    DecayChainResult,
+    ExampleSearchPayload,
+    EventRecordAnalysisPayload,
+    LineageNode,
     LIST_ROOTS_TOOL,
+    RootListPayload,
+    StatusCodeResult,
     RUN_SIMULATION_TOOL,
     SEARCH_EXAMPLES_TOOL,
     SUMMARIZE_EVENT_RECORD_TOOL,
-    TRACE_PARTICLE_LINEAGE_TOOL,
     PythiaSimError,
+    TraceLineageAnalysis,
+    TRACE_PARTICLE_LINEAGE_TOOL,
     PythiaSimulationRunner,
 )
 
 
 SERVER_NAME = "pythia-sim"
 SERVER_VERSION = "0.1.0"
-SUPPORTED_PROTOCOL_VERSIONS = (    "2025-11-25",
+SUPPORTED_PROTOCOL_VERSIONS = (
+    "2025-11-25",
     "2025-06-18",
     "2025-03-26",
     "2024-11-05",
 )
 
 
-def _write_message(payload: dict[str, Any]) -> None:
+def _write_message(payload: dict[str, object]) -> None:
     sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
     sys.stdout.flush()
 
 
-def _write_error(message_id: Any, code: int, message: str) -> None:
+def _write_error(message_id: object, code: int, message: str) -> None:
     _write_message(
         {
             "jsonrpc": "2.0",
@@ -45,7 +56,10 @@ def _write_error(message_id: Any, code: int, message: str) -> None:
         }
     )
 
-def build_tool_result(summary: str, payload: dict[str, Any], *, is_error: bool = False) -> dict[str, Any]:
+
+def build_tool_result(
+    summary: str, payload: Mapping[str, object], *, is_error: bool = False
+) -> dict[str, object]:
     result = {
         "content": [{"type": "text", "text": summary}],
         "structuredContent": payload,
@@ -154,7 +168,7 @@ def _head_tail_text_block(
 def _append_output_block(
     lines: list[str],
     title: str,
-    text: Any,
+    text: object,
     *,
     limit: int = 1600,
     strategy: str = "head",
@@ -174,47 +188,38 @@ def _append_output_block(
     lines.append(trimmed)
 
 
-def _top_count_summary(items: Any) -> str:
-    if not isinstance(items, list) or not items:
+def _top_count_summary(items: list[CountEntry] | None) -> str:
+    if not items:
         return "none"
-    parts: list[str] = []
-    for item in items[:5]:
-        if not isinstance(item, dict):
-            continue
-        key = item.get("key")
-        count = item.get("count")
-        if key is None or count is None:
-            continue
-        parts.append(f"{key}={count}")
+    parts = [f"{item['key']}={item['count']}" for item in items[:5]]
     return ", ".join(parts) if parts else "none"
 
 
-def _format_lineage_path(path: Any) -> str:
-    if not isinstance(path, list) or not path:
+def _format_lineage_path(path: list[LineageNode] | None) -> str:
+    if not path:
         return ""
-    nodes: list[str] = []
-    for node in path:
-        if not isinstance(node, dict):
-            continue
-        index = node.get("index")
-        pdg_id = node.get("id")
-        status = node.get("status")
-        nodes.append(f"{index}:{pdg_id}[{status}]")
-    return " -> ".join(nodes)
+    return " -> ".join(f"{node['index']}:{node['id']}[{node['status']}]" for node in path)
 
 
-def _format_decay_match_sequence(sequence: Any) -> str:
-    if not isinstance(sequence, list) or not sequence:
+def _format_decay_match_sequence(sequence: list[LineageNode] | None) -> str:
+    if not sequence:
         return ""
-    steps: list[str] = []
-    for node in sequence:
-        if not isinstance(node, dict):
-            continue
-        steps.append(f"{node.get('index')}:{node.get('id')}")
-    return " -> ".join(steps)
+    return " -> ".join(f"{node['index']}:{node['id']}" for node in sequence)
 
 
-def _summarize_roots(payload: dict[str, Any]) -> str:
+def _analysis_header_lines(payload: AnalysisPayloadBase) -> list[str]:
+    lines = [
+        f"run_id: {payload['run_id']}",
+        f"root_alias: {payload['root_alias']}",
+    ]
+    if "bootstrap_performed" in payload:
+        lines.append(f"bootstrap_performed: {payload.get('bootstrap_performed')}")
+    if "used_existing_run" in payload:
+        lines.append(f"used_existing_run: {payload.get('used_existing_run')}")
+    return lines
+
+
+def _summarize_roots(payload: RootListPayload) -> str:
     lines = [f"default_alias: {payload['default_alias']}"]
     for root in payload["roots"]:
         status = root["build_status"]
@@ -225,7 +230,7 @@ def _summarize_roots(payload: dict[str, Any]) -> str:
         )
     return "\n".join(lines)
 
-def _summarize_bootstrap(payload: dict[str, Any]) -> str:
+def _summarize_bootstrap(payload: BootstrapPayload) -> str:
     lines = [
         f"ok: {payload.get('ok', False)}",
         f"alias: {payload.get('alias', 'unknown')}",
@@ -236,9 +241,9 @@ def _summarize_bootstrap(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _summarize_run(payload: dict[str, Any]) -> str:
-    compile_result = payload.get("compile", {})
-    run_result = payload.get("run", {})
+def _summarize_run(payload: AnalysisPayloadBase) -> str:
+    compile_result = payload["compile"]
+    run_result = payload["run"]
     lines = [
         f"run_id: {payload['run_id']}",
         f"root_alias: {payload['root_alias']}",
@@ -282,7 +287,7 @@ def _summarize_run(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _summarize_example_search(payload: dict[str, Any]) -> str:
+def _summarize_example_search(payload: ExampleSearchPayload) -> str:
     lines = [
         f"root_alias: {payload['root_alias']}",
         f"examples_path: {payload['examples_path']}",
@@ -295,8 +300,8 @@ def _summarize_example_search(payload: dict[str, Any]) -> str:
     ]
     if payload.get("truncated"):
         lines.append("truncated: true")
-    results = payload.get("results", [])
-    if isinstance(results, list) and results:
+    results = payload["results"]
+    if results:
         lines.append("")
         lines.append("results:")
         for result in results[:5]:
@@ -318,42 +323,40 @@ def _summarize_example_search(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _summarize_event_record(payload: dict[str, Any]) -> str:
+def _summarize_event_record(payload: EventRecordAnalysisPayload) -> str:
     if not payload.get("analysis_ok"):
         return _summarize_run(payload)
-    record = payload.get("event_record", {})
-    lines = [
-        f"run_id: {payload['run_id']}",
-        f"root_alias: {payload['root_alias']}",
-        f"bootstrap_performed: {payload.get('bootstrap_performed')}",
-        f"accepted_event_count: {record.get('accepted_event_count')}",
-        f"failed_event_count: {record.get('failed_event_count')}",
-        f"stored_example_event_count: {record.get('stored_example_event_count')}",
-        f"top_particle_pdg_counts: {_top_count_summary(record.get('top_particle_pdg_counts'))}",
-        f"top_final_state_pdg_counts: {_top_count_summary(record.get('top_final_state_pdg_counts'))}",
-        f"top_status_code_counts: {_top_count_summary(record.get('top_status_code_counts'))}",
-        f"top_decay_chain_counts: {_top_count_summary(record.get('top_decay_chain_counts'))}",
-    ]
+    record = payload["event_record"]
+    lines = _analysis_header_lines(payload)
+    lines.extend(
+        [
+        f"accepted_event_count: {record['accepted_event_count']}",
+        f"failed_event_count: {record['failed_event_count']}",
+        f"stored_example_event_count: {record['stored_example_event_count']}",
+        f"top_particle_pdg_counts: {_top_count_summary(record['top_particle_pdg_counts'])}",
+        f"top_final_state_pdg_counts: {_top_count_summary(record['top_final_state_pdg_counts'])}",
+        f"top_status_code_counts: {_top_count_summary(record['top_status_code_counts'])}",
+        f"top_decay_chain_counts: {_top_count_summary(record['top_decay_chain_counts'])}",
+        ]
+    )
     return "\n".join(lines)
 
 
-def _summarize_lineage_trace(payload: dict[str, Any]) -> str:
+def _summarize_lineage_trace(payload: TraceLineageAnalysis) -> str:
     if not payload.get("analysis_ok"):
         return payload.get("message", _summarize_run(payload))
-    particle = payload.get("selected_particle", {})
-    selected_event = payload.get("selected_event", {})
-    lines = [
-        f"run_id: {payload['run_id']}",
-        f"root_alias: {payload['root_alias']}",
-        f"used_existing_run: {payload.get('used_existing_run')}",
+    particle = payload["selected_particle"]
+    selected_event = payload["selected_event"]
+    lines = _analysis_header_lines(payload)
+    lines.extend([
         f"selected_event: accepted_event_index={selected_event.get('accepted_event_index')} score={selected_event.get('score')}",
         f"selected_particle: index={particle.get('index')} id={particle.get('id')} status={particle.get('status')}",
         f"selected_particle_kinematics: pt={particle.get('pt')} energy={particle.get('energy')} eta={particle.get('eta')} charge={particle.get('charge')}",
-        f"lineage_paths: {len(payload.get('lineage_paths', []))}",
-        f"matched_stop_nodes: {len(payload.get('matched_stop_nodes', []))}",
-    ]
-    lineage_paths = payload.get("lineage_paths", [])
-    if isinstance(lineage_paths, list) and lineage_paths:
+        f"lineage_paths: {len(payload['lineage_paths'])}",
+        f"matched_stop_nodes: {len(payload['matched_stop_nodes'])}",
+    ])
+    lineage_paths = payload["lineage_paths"]
+    if lineage_paths:
         lines.append("")
         lines.append("representative_lineage_paths:")
         for path in lineage_paths[:3]:
@@ -363,16 +366,14 @@ def _summarize_lineage_trace(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _summarize_decay_chain(payload: dict[str, Any]) -> str:
+def _summarize_decay_chain(payload: DecayChainResult) -> str:
     if not payload.get("analysis_ok"):
         return payload.get("message", _summarize_run(payload))
-    chain = payload.get("decay_chain", {})
+    chain = payload["decay_chain"]
     summary_match_count = chain.get("summary_match_count")
     example_snapshot_match_count = chain.get("example_snapshot_match_count")
-    lines = [
-        f"run_id: {payload['run_id']}",
-        f"root_alias: {payload['root_alias']}",
-        f"used_existing_run: {payload.get('used_existing_run')}",
+    lines = _analysis_header_lines(payload)
+    lines.extend([
         f"chain_key: {chain.get('chain_key')}",
         f"match_semantics: {chain.get('match_semantics')}",
         f"summary_histogram_complete: {chain.get('summary_histogram_complete')}",
@@ -382,35 +383,29 @@ def _summarize_decay_chain(payload: dict[str, Any]) -> str:
         f"example_snapshot_match_event_count: {chain.get('example_snapshot_match_event_count')}",
         f"stored_example_event_count: {chain.get('stored_example_event_count')}",
         f"representative_matches: {len(chain.get('representative_matches', []))}",
-    ]
+    ])
     if summary_match_count != example_snapshot_match_count:
         lines.append(
             "count_scope_note: summary_match_count comes from the stored full-run histogram; "
             "example_snapshot_match_count comes from the stored example snapshots used for representatives."
         )
-    representative_matches = chain.get("representative_matches", [])
-    if isinstance(representative_matches, list) and representative_matches:
+    representative_matches = chain["representative_matches"]
+    if representative_matches:
         lines.append("")
         lines.append("representative_matches_detail:")
         for item in representative_matches[:3]:
-            if not isinstance(item, dict):
-                continue
-            lines.append(f"- accepted_event_index={item.get('accepted_event_index')}")
-            matches = item.get("matches", [])
-            if isinstance(matches, list):
-                for sequence in matches[:3]:
-                    rendered = _format_decay_match_sequence(sequence)
-                    if rendered:
-                        lines.append(f"  {rendered}")
+            lines.append(f"- accepted_event_index={item['accepted_event_index']}")
+            for sequence in item["matches"][:3]:
+                rendered = _format_decay_match_sequence(sequence)
+                if rendered:
+                    lines.append(f"  {rendered}")
     return "\n".join(lines)
 
 
-def _summarize_status_codes(payload: dict[str, Any]) -> str:
-    explanations = payload.get("status_code_explanations", [])
+def _summarize_status_codes(payload: StatusCodeResult) -> str:
+    explanations = payload["status_code_explanations"]
     lines = [f"status_codes: {len(explanations)}"]
     for item in explanations[:8]:
-        if not isinstance(item, dict) or "code" not in item or "description" not in item:
-            continue
         observed_count = item.get("observed_count")
         count_text = "" if observed_count is None else f" (observed_count={observed_count})"
         lines.append(f"{item['code']}: {item['description']}{count_text}")
@@ -446,9 +441,11 @@ def main() -> int:
     for message in _read_messages():
         if not isinstance(message, dict):
             continue
+        message = cast(dict[str, object], message)
         method = message.get("method")
         message_id = message.get("id")
-        params = message.get("params") or {}
+        params_obj = message.get("params")
+        params = cast(dict[str, object], params_obj) if isinstance(params_obj, dict) else {}
 
         if method == "initialize":
             client_version = params.get("protocolVersion")
@@ -510,7 +507,8 @@ def main() -> int:
                 _write_error(message_id, -32002, "Server must be initialized before calling tools.")
                 continue
             tool_name = params.get("name")
-            arguments = params.get("arguments") or {}
+            arguments_obj = params.get("arguments")
+            arguments = cast(Mapping[str, object], arguments_obj) if isinstance(arguments_obj, dict) else {}
             if tool_name == "list_pythia_roots":
                 try:
                     payload = runner.list_pythia_roots()

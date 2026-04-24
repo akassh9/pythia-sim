@@ -1,16 +1,16 @@
 # `pythia-sim`
 
-`pythia-sim` is a high-performance Model Context Protocol (MCP) plugin that empowers AI coding agents to natively execute and analyze standalone [Pythia 8](https://pythia.org/) particle physics simulations. 
+`pythia-sim` is a Model Context Protocol (MCP) plugin for running and analyzing standalone [Pythia 8](https://pythia.org/) particle physics simulations.
 
-By abstracting away fragile manual shell workflows, `pythia-sim` provides a deterministic and bounded execution environment. It allows AI agents to instantly generate, trace, and summarize complex high-energy physics (HEP) events directly within their context window.
+It handles local discovery, managed bootstrap installs, bounded simulation runs, and private event-record snapshots for follow-up analysis.
 
 ---
 
-## 🚀 Core Capabilities
+## Core Capabilities
 
-* **Zero-Config Bootstrapping:** Automatically discovers local Pythia installations or securely downloads, compiles, and registers a fresh instance on the fly.
-* **Advanced Event Analysis:** Generates compact, LLM-optimized JSON snapshots of event records. Includes dedicated pipelines to trace particle lineage, map decay chains, and explain physics status codes.
-* **Omni-Host Ready:** Ships with plug-and-play manifests for seamless integration with Gemini CLI and Claude Code. 
+* **Root discovery and bootstrap:** Finds configured local installs or downloads and registers a managed Pythia root.
+* **Event analysis:** Produces compact JSON snapshots and tools for lineage tracing, decay-chain counts, and status-code explanations.
+* **CLI integrations:** Ships manifests for Gemini CLI and Claude Code.
 
 ---
 
@@ -50,7 +50,7 @@ If no usable root is found, call `bootstrap_pythia`.
 
 On a clean first-use machine, `bootstrap_pythia` skips the host search and installs directly into the plugin-managed vendor directory, then writes a registry entry so later tool calls can find that install immediately.
 
-## 🛠️ MCP Tool Surface
+## MCP Tool Surface
 
 The server exposes a targeted suite of tools designed for autonomous agent workflows:
 
