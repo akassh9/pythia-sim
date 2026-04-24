@@ -690,6 +690,57 @@ def test_bootstrap_pythia_skips_autodetect_on_first_install(
     assert registry.roots[core.PYTHIA_AUTO_ALIAS].path == managed_root
 
 
+def test_bootstrap_pythia_writes_explicit_registry_path_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plugin_root = tmp_path / "plugin"
+    plugin_root.mkdir()
+    state_root = tmp_path / "state"
+    registry_path = tmp_path / "config" / "custom-roots.json"
+    runner = core.PythiaSimulationRunner(
+        plugin_root=plugin_root,
+        registry_path=None,
+        state_root=state_root,
+    )
+    monkeypatch.setenv(core.PYTHIA_SIM_REGISTRY_PATH_ENV, str(registry_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setattr(core.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(core, "autodetect_pythia_root", lambda env=None: None)
+
+    def fake_download(url: str, destination: Path) -> None:
+        Path(destination).write_text("mock tarball\n", encoding="utf-8")
+
+    class FakeTarball:
+        def __enter__(self) -> "FakeTarball":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            return False
+
+        def extractall(self, path: Path) -> None:
+            _make_fake_root(path, name=core.PYTHIA_AUTO_ALIAS)
+
+    monkeypatch.setattr(core.urllib.request, "urlretrieve", fake_download)
+    monkeypatch.setattr(
+        core,
+        "_run_configure_and_make",
+        lambda **kwargs: core.CommandExecution(["configure"], 0, "configured\n", ""),
+    )
+    monkeypatch.setattr(core.tarfile, "open", lambda *args, **kwargs: FakeTarball())
+
+    payload = runner.bootstrap_pythia({})
+
+    managed_root = (state_root / "vendor" / core.PYTHIA_AUTO_ALIAS).resolve()
+    assert payload["registry_path"] == str(registry_path)
+    assert registry_path.is_file()
+    registry = core.load_registry(
+        None,
+        env={core.PYTHIA_SIM_REGISTRY_PATH_ENV: str(registry_path)},
+    )
+    assert registry.default_alias == core.PYTHIA_AUTO_ALIAS
+    assert registry.roots[core.PYTHIA_AUTO_ALIAS].path == managed_root
+
+
 def test_bootstrap_pythia_wraps_download_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
