@@ -4,9 +4,9 @@
       "type": "stdio",
       "command": "python3",
       "args": [
-        "${CLAUDE_PLUGIN_ROOT}/scripts/pythia_sim_server.py"
+        "scripts/pythia_sim_server.py"
       ],
-      "cwd": "${CLAUDE_PLUGIN_ROOT}"
+      "cwd": "."
     }
   }
 }

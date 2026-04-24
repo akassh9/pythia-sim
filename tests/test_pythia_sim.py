@@ -1734,10 +1734,8 @@ def test_mcp_config_matches_packaging_entrypoints() -> None:
     assert claude_manifest["mcpServers"] == "./.mcp.json"
     assert "pythia-sim" in gemini_manifest["mcpServers"]
     assert mcp_config["mcpServers"]["pythia-sim"]["command"] == "python3"
-    assert mcp_config["mcpServers"]["pythia-sim"]["args"] == [
-        "${CLAUDE_PLUGIN_ROOT}/scripts/pythia_sim_server.py"
-    ]
-    assert mcp_config["mcpServers"]["pythia-sim"]["cwd"] == "${CLAUDE_PLUGIN_ROOT}"
+    assert mcp_config["mcpServers"]["pythia-sim"]["args"] == ["scripts/pythia_sim_server.py"]
+    assert mcp_config["mcpServers"]["pythia-sim"]["cwd"] == "."
 
 
 def test_claude_marketplace_manifest_points_to_repo_root_plugin() -> None:
