@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from collections import defaultdict
 from pathlib import Path
 
@@ -84,3 +85,14 @@ def test_core_and_server_have_one_way_dependency() -> None:
 
     assert core_imports == set()
     assert server_imports == {"pythia_sim_core"}
+
+
+def test_shared_mcp_manifest_uses_plugin_relative_paths() -> None:
+    manifest_path = PLUGIN_ROOT / ".mcp.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    server = manifest["mcpServers"]["pythia-sim"]
+
+    assert server["command"] == "python3"
+    assert server["args"] == ["scripts/pythia_sim_server.py"]
+    assert server["cwd"] == "."
+    assert "CLAUDE_PLUGIN_ROOT" not in manifest_path.read_text(encoding="utf-8")
