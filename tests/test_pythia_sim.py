@@ -1579,6 +1579,7 @@ def test_summarize_event_record_uses_generated_capture_payload(
     ) -> core.SimulationLifecycleResult:
         captured["root_alias"] = root.alias
         captured["source_cpp"] = source_path.read_text(encoding="utf-8")
+        captured["max_output_bytes"] = max_output_bytes
         captured["supporting_files"] = sorted(path.name for path in run_dir.iterdir() if path.name != "source.cpp")
         (run_dir / core.EVENT_RECORD_SUMMARY_ARTIFACT).write_text(
             (runner.completed_runs_root / "generated123" / core.EVENT_RECORD_SUMMARY_ARTIFACT).read_text(
@@ -1629,6 +1630,7 @@ def test_summarize_event_record_uses_generated_capture_payload(
             "commands": ["Beams:eCM = 13000.", "WeakSingleBoson:ffbar2gmZ = on"],
             "cmnd_text": "23:onMode = off\n23:onIfAny = 13\n",
             "event_count": 25,
+            "max_output_bytes": core.MIN_OUTPUT_BYTES,
         }
     )
 
@@ -1636,6 +1638,7 @@ def test_summarize_event_record_uses_generated_capture_payload(
     assert payload["event_record"]["accepted_event_count"] == 8
     assert "source_cpp" in captured
     assert 'WeakSingleBoson:ffbar2gmZ = on' in str(captured["source_cpp"])
+    assert captured["max_output_bytes"] == core.MIN_OUTPUT_BYTES
     assert sorted(captured["supporting_files"]) == ["pythia_sim_artifacts.h", "settings.cmnd"]
 
 

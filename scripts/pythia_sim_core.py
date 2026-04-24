@@ -3427,7 +3427,7 @@ class PythiaSimulationRunner:
             "example_event_limit": spec.example_event_limit,
             "compile_timeout_sec": spec.compile_timeout_sec,
             "run_timeout_sec": spec.run_timeout_sec,
-            "max_output_bytes": max(spec.max_output_bytes, MAX_OUTPUT_BYTES),
+            "max_output_bytes": spec.max_output_bytes,
         }
 
         run_dir = self._make_run_dir()
@@ -3447,7 +3447,7 @@ class PythiaSimulationRunner:
                 source_path=source_path,
                 compile_timeout_sec=spec.compile_timeout_sec,
                 run_timeout_sec=spec.run_timeout_sec,
-                max_output_bytes=max(spec.max_output_bytes, MAX_OUTPUT_BYTES),
+                max_output_bytes=spec.max_output_bytes,
             )
             bootstrap_performed = lifecycle.bootstrap_performed
             compile_result = lifecycle.compile_result
